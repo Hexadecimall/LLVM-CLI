@@ -17,8 +17,7 @@ For Neovim and other LSP editors, use the embedded `llvm clangd`; see
 
 ## Install from a release
 
-After a public repository and an audited release have been published, install
-the native macOS/Apple Silicon edition with:
+Install the native macOS/Apple Silicon edition with:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Hexadecimall/LLVM-CLI/main/install/install.sh | sh
@@ -50,9 +49,13 @@ for a host-native CLI.
 
 For release preparation, run `python3 tools/prepare_release.py --output-dir
 release-assets --binary darwin-arm64=PATH_TO_NATIVE_LLVM` and upload every
-file in `release-assets` to the same GitHub Release. The release packer audits
-source and binary paths before packaging. It splits the current 2.6 GB macOS
-binary into 1 GiB assets because a GitHub Release asset must be under 2 GiB.
+file in `release-assets` to the same GitHub Release. `ghx api` creates and
+publishes the release; `python3 tools/upload_release_asset.py RELEASE_ID FILE`
+streams each asset using the existing `ghx` credential without printing or
+storing it. Keep the release in draft until every uploaded size and digest has
+been checked against the manifest. The release packer audits source and binary
+paths before packaging. It splits the current 2.6 GB macOS binary into 1 GiB
+assets because a GitHub Release asset must be under 2 GiB.
 Add Linux or Windows binaries only after those editions are built and verified
 on their native hosts.
 
