@@ -1,0 +1,30 @@
+# Recovered upstream sources, toolchains, and generated single-file images.
+/recovered/
+/dependency-bundles/
+/dependency-objects/
+/validation/
+/host-build/
+/release-assets/
+
+# Test outputs and local build products.
+/tests/build/
+/tools/__pycache__/
+/tools/*.o
+/tools/*.pack
+/tools/*.bundle
+/tools/LLVM
+/tools/LLVM-smoke
+/tools/llvm-pack
+/tools/static-flag-test
+/tools/test-tool
+/tools/smoke-cache*/
+/tools/smoke-root/
+/tools/smoke-*/
+/doctor.err
+/doctor.out
+/smoke
+/smoke-fortran
+/smoke.c
+/smoke.f90
+*.dSYM/
+.DS_Store
