@@ -1,0 +1,75 @@
+--- a/llvm/lib/Support/VirtualFileSystem.cpp
++++ b/llvm/lib/Support/VirtualFileSystem.cpp
+@@ -41,6 +41,7 @@
+ #include <atomic>
+ #include <cassert>
+ #include <cstdint>
++#include <dlfcn.h>
+ #include <iterator>
+ #include <limits>
+ #include <map>
+@@ -54,6 +55,11 @@
+ using namespace llvm;
+ using namespace llvm::vfs;
+ 
++using LLVMEmbeddedFileVisitor =
++    void (*)(const char *, const void *, std::size_t, void *);
++using LLVMEnumerateEmbeddedFilesFn =
++    void (*)(LLVMEmbeddedFileVisitor, void *);
++
+ using llvm::sys::fs::file_t;
+ using llvm::sys::fs::file_status;
+ using llvm::sys::fs::file_type;
+@@ -419,9 +425,37 @@
+   OS << " CWD\n";
+ }
+ 
++static IntrusiveRefCntPtr<InMemoryFileSystem> createEmbeddedFileSystem() {
++  static IntrusiveRefCntPtr<InMemoryFileSystem> Memory = [] {
++    auto Enumerate = reinterpret_cast<LLVMEnumerateEmbeddedFilesFn>(
++        dlsym(RTLD_DEFAULT, "LLVMEnumerateEmbeddedFiles"));
++    if (!Enumerate)
++      return IntrusiveRefCntPtr<InMemoryFileSystem>();
++    auto FS = makeIntrusiveRefCnt<InMemoryFileSystem>();
++    auto AddFile = [](const char *Path, const void *Data, std::size_t Size,
++                      void *Context) {
++      auto *FS = static_cast<InMemoryFileSystem *>(Context);
++      FS->addFile(Path, 0,
++                  MemoryBuffer::getMemBufferCopy(
++                      StringRef(static_cast<const char *>(Data), Size), Path));
++    };
++    Enumerate(AddFile, FS.get());
++    return FS;
++  }();
++  return Memory;
++}
++
+ IntrusiveRefCntPtr<FileSystem> vfs::getRealFileSystem() {
+-  static IntrusiveRefCntPtr<FileSystem> FS =
+-      makeIntrusiveRefCnt<RealFileSystem>(true);
++  static IntrusiveRefCntPtr<FileSystem> FS = [] {
++    IntrusiveRefCntPtr<FileSystem> Physical =
++        makeIntrusiveRefCnt<RealFileSystem>(true);
++    auto Memory = createEmbeddedFileSystem();
++    if (!Memory)
++      return Physical;
++    auto Overlay = makeIntrusiveRefCnt<OverlayFileSystem>(Physical);
++    Overlay->pushOverlay(Memory);
++    return IntrusiveRefCntPtr<FileSystem>(std::move(Overlay));
++  }();
+   sys::sandbox::violationIfEnabled();
+ 
+   return FS;
+@@ -430,6 +461,12 @@
+ std::unique_ptr<FileSystem> vfs::createPhysicalFileSystem() {
+   sys::sandbox::violationIfEnabled();
+ 
++  if (auto Memory = createEmbeddedFileSystem()) {
++    auto Physical = makeIntrusiveRefCnt<RealFileSystem>(false);
++    auto Overlay = std::make_unique<OverlayFileSystem>(Physical);
++    Overlay->pushOverlay(Memory);
++    return Overlay;
++  }
+   return std::make_unique<RealFileSystem>(false);
+ }
+ 

@@ -1,0 +1,19 @@
+--- a/clang-tools-extra/clangd/CompileCommands.cpp
++++ b/clang-tools-extra/clangd/CompileCommands.cpp
+@@ -27,6 +27,7 @@
+ #include "llvm/Support/MemoryBuffer.h"
+ #include "llvm/Support/Path.h"
+ #include "llvm/Support/Program.h"
++#include "llvm/Support/VirtualFileSystem.h"
+ #include <iterator>
+ #include <optional>
+ #include <string>
+@@ -139,6 +140,9 @@
+ std::optional<std::string>
+ detectResourceDirWithClangPath(std::optional<std::string> ClangPath) {
++  constexpr llvm::StringLiteral EmbeddedResourceDir = "/__llvm/lib/clang/23";
++  if (llvm::vfs::getRealFileSystem()->exists(EmbeddedResourceDir))
++    return EmbeddedResourceDir.str();
+   std::string ResourceDir = detectStandardResourceDir();
+   if (llvm::sys::fs::exists(ResourceDir))
+     return ResourceDir;

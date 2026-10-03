@@ -12,6 +12,8 @@ and the disk-space constraints.
 are read from the binary's virtual `/__llvm` root.
 LLVM-prefixed tools accept the shorter command name too: `llvm nm`,
 `llvm ar`, and `llvm objdump` invoke their embedded `llvm-*` counterparts.
+For Neovim and other LSP editors, use the embedded `llvm clangd`; see
+[Editor integration](docs/editors.md).
 
 ## Install from a release
 
@@ -153,5 +155,9 @@ LLVM-CLI's original source uses Apache-2.0 WITH LLVM-exception; see
 [LICENSE](LICENSE). Bundled upstream components retain their own licenses,
 collected under [licenses](licenses). The source tree deliberately excludes
 recovered toolchains, object files, generated images, and local test output.
+The upstream changes needed for embedded-header lookup in `clangd` live in
+[`patches/llvm-embedded-vfs.patch`](patches/llvm-embedded-vfs.patch) and
+[`patches/clangd-embedded-resource-dir.patch`](patches/clangd-embedded-resource-dir.patch).
+Apply both to the LLVM 23.1.1 source tree before rebuilding those components.
 Run `python3 tools/audit_public.py` before publishing source; pass a release
 binary path as an argument to check it for local home/project paths too.
