@@ -88,6 +88,13 @@ try {
         throw "Invalid binary size or part count"
     }
 
+    if ((Test-Path -LiteralPath $target -PathType Leaf) -and -not $Force -and
+        (Get-Item -LiteralPath $target).Length -eq $expectedSize -and
+        (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $expectedHash) {
+        Write-Host "LLVM-CLI $Version is already installed in $InstallDir"
+        return
+    }
+
     $image = Join-Path $work "llvm.exe"
     $output = [IO.File]::Open(
         $image, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,

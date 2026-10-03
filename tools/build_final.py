@@ -72,7 +72,7 @@ def resign_payload_machos(root: Path, changed: set[Path]) -> None:
                 run(["codesign", "-s", "-", "--force", str(path)])
 
 
-def core_link_command(container: Path, wrappers: Path, pack: Path,
+def core_link_command(container: Path, wrappers: Path, builder: Path, pack: Path,
                       output: Path) -> list[str]:
     tokens = shlex.split(CORE_LINK.read_text())
     root = BUILD / "tools"
@@ -83,7 +83,7 @@ def core_link_command(container: Path, wrappers: Path, pack: Path,
     ]
     command = [tokens[0], "-nostdlib++"]
     command.extend(f"-Wl,-exported_symbol,{symbol}" for symbol in exported)
-    command.extend([str(container), str(wrappers)])
+    command.extend([str(container), str(wrappers), str(builder)])
     skip = False
     for raw_token in tokens[1:]:
         token = relocated(raw_token)
@@ -130,6 +130,7 @@ def main() -> int:
         raise RuntimeError("zstd.h not found; set ZSTD_INCLUDE_DIR")
     container = TOOLS / "llvm-memory.o"
     wrappers = TOOLS / "native-wrappers.o"
+    builder = TOOLS / "incremental-build.o"
 
     run([
         compiler, "-std=c++23", "-O3", "-fvisibility=hidden",
@@ -141,10 +142,15 @@ def main() -> int:
         f"-I{TOOLS}", f"-I{WORK / 'deps/include'}", "-c",
         str(TOOLS / "native-wrappers.cpp"), "-o", str(wrappers),
     ])
+    run([
+        compiler, "-std=c++23", "-O3", "-fvisibility=hidden",
+        f"-I{TOOLS}", "-c", str(TOOLS / "incremental-build.cpp"),
+        "-o", str(builder),
+    ])
     changed_payloads = scrub_payload_paths(PAYLOAD)
     resign_payload_machos(PAYLOAD, changed_payloads)
     run([str(TOOLS / "llvm-pack"), str(PAYLOAD), str(PACK)])
-    run(core_link_command(container, wrappers, PACK, OUTPUT))
+    run(core_link_command(container, wrappers, builder, PACK, OUTPUT))
     scrub_private_paths(OUTPUT)
     run(["codesign", "-s", "-", "--force", str(OUTPUT)])
     os.replace(OUTPUT, IMAGE / "LLVM")

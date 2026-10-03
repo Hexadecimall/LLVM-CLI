@@ -3,6 +3,7 @@
 
 #include "pack-format.h"
 #include "native-wrappers.h"
+#include "incremental-build.h"
 
 #include <zstd.h>
 
@@ -463,19 +464,49 @@ bool parseCompileTarget(std::string_view value, CompileTarget &target) {
           "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.+-") !=
                            std::string_view::npos)
     return false;
-  const std::size_t first = value.find('-');
+  std::string normalized(value);
+  const std::size_t first = normalized.find('-');
   if (first == std::string_view::npos || first == 0)
     return false;
-  const std::size_t second = value.find('-', first + 1);
-  const std::string arch(value.substr(0, first));
-  target.Arch = arch;
-  target.Requested = value;
-  target.Os = value.substr(first + 1, second == std::string_view::npos
-                                           ? second : second - first - 1);
-  const std::string abi = second == std::string_view::npos
-      ? "" : std::string(value.substr(second + 1));
-  if (target.Os.empty() || (second != std::string_view::npos && abi.empty()))
+  std::size_t second = normalized.find('-', first + 1);
+  std::string arch = normalized.substr(0, first);
+  std::string os = normalized.substr(first + 1,
+      second == std::string::npos ? second : second - first - 1);
+  std::string abi = second == std::string::npos
+      ? "" : normalized.substr(second + 1);
+  bool hadVendor = false;
+  if ((os == "unknown" || os == "pc" || os == "apple" || os == "w64") &&
+      !abi.empty()) {
+    hadVendor = true;
+    const std::size_t vendorEnd = abi.find('-');
+    os = abi.substr(0, vendorEnd);
+    abi = vendorEnd == std::string::npos ? "" : abi.substr(vendorEnd + 1);
+  }
+  if (arch == "linux" &&
+      (os == "arm64" || os == "aarch64" || os == "amd64" ||
+       os == "x86_64")) {
+    arch = os;
+    os = "linux";
+    if (abi.empty())
+      abi = "musl";
+  }
+  if (arch == "arm64")
+    arch = "aarch64";
+  else if (arch == "amd64")
+    arch = "x86_64";
+  if (os == "darwin" || os == "macosx")
+    os = "macos";
+  else if (os == "wasip1")
+    os = "wasi";
+  if (os.empty() || (second != std::string::npos && abi.empty() &&
+                     !hadVendor))
     return false;
+  normalized = arch + "-" + os;
+  if (!abi.empty() && abi != "none")
+    normalized += "-" + abi;
+  target.Arch = arch;
+  target.Requested = normalized;
+  target.Os = os;
   const std::string clangArch = arch == "x86" ? "i386" :
                                 arch == "aarch64" ? "aarch64" : arch;
   if (target.Os == "macos" || target.Os == "ios" || target.Os == "tvos" ||
@@ -836,10 +867,18 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
         isDriverLink(argc, argv, firstArgument) &&
         !hasArgument(argc, argv, firstArgument, "-nostdlib") &&
         !hasUserSysroot(argc, argv, firstArgument) && !sharedLink) {
-      std::cerr << "LLVM: '" << compileTarget->Requested
-                << "' has no embedded target C runtime for linking; use -c "
-                   "for object output, or supply -nostdlib and your own "
-                   "entry/runtime\n";
+      if (compileTarget->Os == "linux" &&
+          compileTarget->Requested.ends_with("-gnu"))
+        std::cerr << "LLVM: '" << compileTarget->Requested
+                  << "' needs a target glibc sysroot for linking; use "
+                     "--sysroot=PATH, or choose "
+                  << compileTarget->Arch << "-linux-musl for the bundled "
+                     "runtime\n";
+      else
+        std::cerr << "LLVM: '" << compileTarget->Requested
+                  << "' has no embedded target C runtime for linking; use "
+                     "-c for object output, or supply -nostdlib and your "
+                     "own entry/runtime\n";
       return 2;
     }
     if (isClangDriver(invokedName) && sharedLink && !bundledRuntime &&
@@ -1146,7 +1185,7 @@ std::string shortcutTarget(std::string_view requested) {
 }
 
 std::vector<std::string> toolNames() {
-  std::vector<std::string> names{"llvm", "ld"};
+  std::vector<std::string> names{"llvm", "ld", "build"};
   for (const Entry &entry : Entries) {
     constexpr std::string_view bundlePrefix = "bundles/";
     constexpr std::string_view aliasPrefix = "aliases/";
@@ -1177,7 +1216,7 @@ void listTools(std::string_view filter = {}) {
 }
 
 void printVersion() {
-  std::cout << "LLVM-CLI 1.5.0\n"
+  std::cout << "LLVM-CLI 1.6.0\n"
                "LLVM 23.1.1\n"
                "Target: arm64-apple-darwin\n";
 }
@@ -1198,6 +1237,7 @@ void printHelp() {
       "Usage:\n"
       "  llvm <tool> [arguments]       Run any embedded tool\n"
       "  llvm <compiler> -compile-target <target> [arguments]\n"
+      "  llvm build [options] <sources...>  Incremental project build\n"
       "  llvm run <tool> [arguments]   Explicit tool invocation\n\n"
       "Cross compilation:\n"
       "  llvm cc -compile-target <arch-os-abi> file.c -c -o file.o\n"
@@ -1216,6 +1256,7 @@ void printHelp() {
       "  extras [tool]                 Show LLVM-CLI tools and added flags\n"
       "  env                           Show virtual toolchain paths\n"
       "  doctor                        Check the embedded toolchain payload\n"
+      "  build                         Compile only changed sources, then link\n"
       "  root                          Print the virtual root (/__llvm)\n\n"
       "Friendly shortcuts:\n"
       "  cc       -> clang             c++      -> clang++\n"
@@ -1229,6 +1270,7 @@ void printHelp() {
       "  symbols  -> llvm-nm           archive  -> llvm-ar\n\n"
       "Examples:\n"
       "  llvm cc hello.c -o hello\n"
+      "  llvm build --output hello hello.c\n"
       "  llvm c++ app.cpp -std=c++23 -o app\n"
       "  llvm fortran simulation.f90 -o simulation\n"
       "  llvm debug ./hello\n"
@@ -1274,20 +1316,27 @@ void printCompileTargets(std::string_view filter = {}) {
               << " unsupported profiles; no Ghidra target C runtime\n";
     return;
   }
-  if (filter.find(':') != std::string_view::npos) {
+  if (!filter.empty()) {
     CompileTarget target;
     if (parseCompileTarget(filter, target)) {
-      std::cout << target.Requested << " -> " << target.Triple;
+      std::cout << filter << " -> " << target.Requested << " -> "
+                << target.Triple;
       for (const std::string &option : target.DriverOptions)
         std::cout << ' ' << option;
-      std::cout << " (object/assembly)\n";
+      std::cout << '\n';
+      if (target.Os == "linux" &&
+          !findEntry("root/targets/" + target.Requested + "/lib/libc.a"))
+        std::cout << "  linking: supply a compatible sysroot, or use "
+                     "x86_64-linux-musl/aarch64-linux-musl\n";
     } else {
-      std::cout << target.Error << '\n';
+      std::cout << (target.Error.empty() ? "invalid target" : target.Error)
+                << '\n';
     }
     return;
   }
   std::cout <<
-      "Compile targets use Zig-style arch-os-abi names.\n"
+      "Compile targets accept arch-os-abi names and common LLVM triples.\n"
+      "linux-arm64 and linux-x86_64 default to the embedded musl runtime.\n"
       "Examples: x86_64-linux-musl, aarch64-linux-gnu, "
       "x86_64-windows-gnu, wasm32-wasi, x86_64-macos, "
       "riscv64-freestanding.\n"
@@ -1309,6 +1358,12 @@ void printCompileTargets(std::string_view filter = {}) {
 }
 
 bool printToolInfo(std::string requested) {
+  if (requested == "build") {
+    std::cout << "build\n  kind: incremental in-binary build command\n"
+                 "  syntax: llvm build --output APP [--target TARGET] SOURCE...\n"
+                 "  help: llvm build --help\n";
+    return true;
+  }
   if (requested == "ld" || requested == "lld") {
     std::cout << requested
               << "\n  kind: in-process LLD cross-linker dispatcher"
@@ -1376,6 +1431,7 @@ bool printExtras(std::string requested = {}) {
         "  llvm info <tool>            Show a tool's embedded implementation\n"
         "  llvm compile-targets        Show cross-target runtime coverage\n"
         "  llvm doctor                 Check the packed payload\n\n"
+        "  llvm build                  Incremental C/C++ project build\n\n"
         "Added flag (compiler commands):\n"
         "  llvm <compiler> -compile-target <arch-os-abi> [arguments]\n"
         "  Applies to cc, c++, cpp, clang, clang++, clang-cpp, "
@@ -1389,6 +1445,12 @@ bool printExtras(std::string requested = {}) {
   }
   if (!std::ranges::binary_search(toolNames(), requested))
     return false;
+  if (requested == "build") {
+    std::cout << "build\n  syntax: llvm build [options] SOURCE...\n"
+                 "  flags: --target, --output, --build-dir, --release, "
+                 "--cflag, --ldflag\n";
+    return true;
+  }
   const std::string shortcut = shortcutTarget(requested);
   const std::string canonical = canonicalTool(
       shortcut.empty() ? requested : shortcut);
@@ -1800,8 +1862,8 @@ int main(int argc, char **argv) {
         if (!compileTarget.Error.empty())
           std::cerr << "LLVM: " << compileTarget.Error << '\n';
         else
-          std::cerr << "LLVM: expected -compile-target <arch-os-abi> or "
-                       "<Ghidra processor ID>\n";
+          std::cerr << "LLVM: expected -compile-target <arch-os-abi>, "
+                       "<LLVM triple>, or <Ghidra processor ID>\n";
         return 2;
       }
       selectedTarget = true;
@@ -1862,6 +1924,48 @@ int main(int argc, char **argv) {
       printCompileTargets(argc >= 3 ? std::string_view(argv[2]) :
                                         std::string_view{});
       return 0;
+    }
+    if (command == "build") {
+      return runIncrementalBuild(argc, argv, 2, MainExecutablePath,
+          [&](std::string_view compiler, std::string_view target,
+              const std::vector<std::string> &options) {
+        CompileTarget parsed;
+        if (!target.empty() && !parseCompileTarget(target, parsed)) {
+          std::cerr << "LLVM build: invalid target '" << target << "'\n";
+          return 2;
+        }
+        if (target.empty() || parsed.Os == "macos")
+          configureAppleSdk();
+        ActiveCompileTarget = target.empty() ? "" : parsed.Requested;
+        const pid_t child = ::fork();
+        if (child < 0) {
+          std::cerr << "LLVM build: cannot start embedded compiler: "
+                    << std::strerror(errno) << '\n';
+          return 1;
+        }
+        if (child == 0) {
+          std::vector<std::string> storage{"llvm"};
+          storage.insert(storage.end(), options.begin(), options.end());
+          std::vector<char *> arguments;
+          for (std::string &option : storage)
+            arguments.push_back(option.data());
+          arguments.push_back(nullptr);
+          const int result = runBundle("llvm", std::string(compiler),
+              static_cast<int>(storage.size()), arguments.data(), 1, {},
+              target.empty() ? nullptr : &parsed);
+          std::cout.flush();
+          std::cerr.flush();
+          ::_exit(result);
+        }
+        int status = 0;
+        while (::waitpid(child, &status, 0) < 0) {
+          if (errno == EINTR)
+            continue;
+          return 1;
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) :
+               WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+      });
     }
     if (command == "extras") {
       if (!printExtras(argc >= 3 ? argv[2] : "")) {

@@ -87,6 +87,17 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn("SHA-256 mismatch", result.stderr)
         self.assertFalse((directory / "llvm").exists())
 
+    def test_skips_download_when_installed_binary_matches_manifest(self):
+        directory = self.root / "installed"
+        first = self._install(directory)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        for part in self.assets.glob("*.part*"):
+            part.unlink()
+        second = self._install(directory)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("already installed", second.stdout)
+        self.assertEqual((directory / "llvm").read_bytes(), self.binary.read_bytes())
+
     def test_packager_rejects_wrong_host_format(self):
         with self.assertRaisesRegex(ValueError, "native darwin-arm64"):
             validate_host_format("darwin-arm64", self.binary)

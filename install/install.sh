@@ -136,6 +136,19 @@ part_count=$5
 [ "$expected_size" -gt 0 ] && [ "$part_count" -gt 0 ] &&
     [ "$part_count" -le 999 ] || fail "invalid binary size or part count"
 
+installed="$install_dir/llvm"
+if [ "$force" -eq 0 ] && [ -f "$installed" ] &&
+   { [ "$case_sensitive" -eq 0 ] ||
+     { [ -L "$install_dir/LLVM" ] &&
+       [ "$(readlink "$install_dir/LLVM")" = llvm ]; }; }; then
+    installed_size=$(wc -c < "$installed" | tr -d ' ')
+    if [ "$installed_size" -eq "$expected_size" ] &&
+       [ "$(hash_file "$installed")" = "$expected_hash" ]; then
+        printf 'LLVM-CLI %s is already installed in %s\n' "$version" "$install_dir"
+        exit 0
+    fi
+fi
+
 image="$work/llvm"
 : > "$image"
 index=0

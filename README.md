@@ -32,6 +32,8 @@ irm https://raw.githubusercontent.com/Hexadecimall/LLVM-CLI/main/install/install
 Inspect a remote installer before piping it into a shell. The scripts pin the
 resolved release tag, verify every downloaded part and the assembled binary
 against the release manifest's SHA-256 hashes, then install one executable.
+If the installed executable already matches the release size and SHA-256, the
+installer skips the binary downloads entirely.
 These hashes detect transfer errors and tampering relative to the manifest;
 they are not an independent publisher signature. The macOS installer also
 checks the executable's code signature. Set `LLVM_CLI_VERSION` to a release
@@ -151,6 +153,36 @@ toolchain. C and freestanding C++ remain available.
 `-compile-target` selects the target for Clang, Flang, or `llc`. Flang 23 has
 target-specific lowering for fewer architectures than Clang, so some valid
 Clang targets cannot compile Fortran.
+
+Common LLVM triples such as `x86_64-unknown-linux-musl` are accepted as
+aliases of `x86_64-linux-musl`. `linux-arm64` selects the embedded
+`aarch64-linux-musl` target. Run `llvm compile-targets TARGET` to see a
+normalization. A GNU/Linux target such as `x86_64-unknown-linux-gnu` is not
+silently changed into musl: executable linking needs a matching glibc
+`--sysroot`. `-target` remains Clang's raw triple flag; use either it or
+`-compile-target`, not both.
+
+## Incremental builds
+
+`llvm build` compiles C, C++, Objective-C, Objective-C++, and assembly sources
+with the same embedded Clang and linker. It keeps objects and dependency files
+in a durable `.llvm-cli-build` directory in the current project, checks local
+header dependencies, and links again only when inputs or flags changed:
+
+```sh
+llvm build --output app src/main.cpp src/helper.cpp
+llvm build --target x86_64-linux-musl --output app-linux src/main.c
+llvm build --release --output app src/main.cpp --cflag=-Iinclude --ldflag=-lm
+```
+
+Use `--build-dir PATH` to choose another project-local build directory, and
+add `.llvm-cli-build/` to the project's `.gitignore`. `--release` enables
+`-O3 -flto=thin`; debug-oriented builds default to `-O0`. `--cflag` and
+`--ldflag` are repeatable. External libraries remain explicit: adding a
+header search path does not link its library. For example, Homebrew fmt needs
+`--ldflag=-lfmt` and, if outside the default search path, a suitable
+`--ldflag=-L...`; `-DFMT_HEADER_ONLY` is an alternative when fmt's header-only
+mode is appropriate. This build command does not yet orchestrate Fortran.
 
 ## Source and licensing
 

@@ -5,6 +5,7 @@
 /validation/
 /host-build/
 /release-assets/
+/.llvm-cli-build/
 
 # Test outputs and local build products.
 /tests/build/
