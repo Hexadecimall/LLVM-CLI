@@ -65,6 +65,30 @@ check_number() {
     case "$1" in ''|*[!0-9]*) fail "invalid number in release manifest" ;; esac
 }
 
+is_newer_version() {
+    printf '%s\n%s\n' "$1" "$2" | awk '
+        function parse(value, parts, count, component) {
+            sub(/^v/, "", value)
+            count = split(value, parts, /\./)
+            if (count != 3) return 0
+            for (component = 1; component <= 3; component++)
+                if (parts[component] !~ /^[0-9]+$/) return 0
+            return 1
+        }
+        NR == 1 { installed = $0 }
+        NR == 2 { available = $0 }
+        END {
+            if (!parse(installed, current) || !parse(available, release))
+                exit 1
+            for (i = 1; i <= 3; i++) {
+                if (current[i] + 0 > release[i] + 0) exit 0
+                if (current[i] + 0 < release[i] + 0) exit 1
+            }
+            exit 1
+        }
+    '
+}
+
 case "$(uname -s):$(uname -m)" in
     Darwin:arm64) platform=darwin-arm64 ;;
     Linux:x86_64) platform=linux-x86_64 ;;
@@ -108,6 +132,17 @@ for name in LLVM llvm; do
     fi
 done
 
+installed="$install_dir/llvm"
+if [ "$force" -eq 0 ] && [ -f "$installed" ]; then
+    installed_version=$("$installed" --version 2>/dev/null |
+        sed -n '1s/^LLVM-CLI \([^ ]*\).*/\1/p')
+    if is_newer_version "$installed_version" "$version"; then
+        printf 'LLVM-CLI %s is newer than release %s; keeping %s (use --force to downgrade)\n' \
+            "$installed_version" "$version" "$installed"
+        exit 0
+    fi
+fi
+
 work=$(mktemp -d "$install_dir/.llvm-cli-install.XXXXXXXX") ||
     fail "could not create an installation staging directory"
 touch "$work/case-test"
@@ -121,12 +156,21 @@ manifest="$work/llvm-cli-manifest-v1.txt"
 curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 \
     --connect-timeout 15 -o "$manifest" "$base/llvm-cli-manifest-v1.txt" ||
     fail "release $version has no installer manifest"
-[ "$(sed -n '1p' "$manifest")" = llvm-cli-release-v1 ] ||
-    fail "unsupported release manifest"
+case "$(sed -n '1p' "$manifest")" in
+    llvm-cli-release-v1) compression=none ;;
+    llvm-cli-release-v2) compression=gzip ;;
+    *) fail "unsupported release manifest" ;;
+esac
 
 entry=$(awk -v p="$platform" '$1 == "binary" && $2 == p { print }' "$manifest")
 set -- $entry
-[ "$#" -eq 5 ] || fail "release $version has no native $platform binary"
+if [ "$compression" = gzip ]; then
+    [ "$#" -eq 6 ] || fail "release $version has no native $platform binary"
+    [ "$6" = gzip ] || fail "unsupported release compression"
+    command -v gzip >/dev/null 2>&1 || fail "gzip is required for this release"
+else
+    [ "$#" -eq 5 ] || fail "release $version has no native $platform binary"
+fi
 check_number "$3"
 check_hash "$4"
 check_number "$5"
@@ -136,7 +180,6 @@ part_count=$5
 [ "$expected_size" -gt 0 ] && [ "$part_count" -gt 0 ] &&
     [ "$part_count" -le 999 ] || fail "invalid binary size or part count"
 
-installed="$install_dir/llvm"
 if [ "$force" -eq 0 ] && [ -f "$installed" ] &&
    { [ "$case_sensitive" -eq 0 ] ||
      { [ -L "$install_dir/LLVM" ] &&
@@ -150,7 +193,9 @@ if [ "$force" -eq 0 ] && [ -f "$installed" ] &&
 fi
 
 image="$work/llvm"
-: > "$image"
+payload=$image
+if [ "$compression" = gzip ]; then payload="$work/llvm.gz"; fi
+: > "$payload"
 index=0
 while [ "$index" -lt "$part_count" ]; do
     part_entry=$(awk -v p="$platform" -v n="$index" \
@@ -172,10 +217,15 @@ while [ "$index" -lt "$part_count" ]; do
     [ "$actual_size" -eq "$part_size" ] || fail "size mismatch: $part_name"
     [ "$(hash_file "$part")" = "$part_hash" ] ||
         fail "SHA-256 mismatch: $part_name"
-    cat "$part" >> "$image"
+    cat "$part" >> "$payload"
     rm -- "$part"
     index=$((index + 1))
 done
+
+if [ "$compression" = gzip ]; then
+    gzip -dc "$payload" > "$image" || fail "gzip decompression failed"
+    rm -- "$payload"
+fi
 
 actual_size=$(wc -c < "$image" | tr -d ' ')
 [ "$actual_size" -eq "$expected_size" ] || fail "assembled binary size mismatch"

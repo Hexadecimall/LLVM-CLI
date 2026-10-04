@@ -34,6 +34,10 @@ resolved release tag, verify every downloaded part and the assembled binary
 against the release manifest's SHA-256 hashes, then install one executable.
 If the installed executable already matches the release size and SHA-256, the
 installer skips the binary downloads entirely.
+It also keeps a newer installed version instead of silently downgrading it;
+use `--force` or `-Force` only when an intentional downgrade is wanted.
+Release v2 assets are gzip-compressed for transfer and expand to the same
+single executable after verification.
 These hashes detect transfer errors and tampering relative to the manifest;
 they are not an independent publisher signature. The macOS installer also
 checks the executable's code signature. Set `LLVM_CLI_VERSION` to a release
@@ -49,15 +53,15 @@ The macOS installer writes one lowercase `llvm` executable; an uppercase
 LLVM-CLI release is available yet. Cross-compiled output is not a substitute
 for a host-native CLI.
 
-For release preparation, run `python3 tools/prepare_release.py --output-dir
-release-assets --binary darwin-arm64=PATH_TO_NATIVE_LLVM` and upload every
+For release preparation, run `python3 tools/prepare_release.py --gzip
+--output-dir release-assets --binary darwin-arm64=PATH_TO_NATIVE_LLVM` and upload every
 file in `release-assets` to the same GitHub Release. `ghx api` creates and
 publishes the release; `python3 tools/upload_release_asset.py RELEASE_ID FILE`
 streams each asset using the existing `ghx` credential without printing or
 storing it. Keep the release in draft until every uploaded size and digest has
 been checked against the manifest. The release packer audits source and binary
-paths before packaging. It splits the current 2.6 GB macOS binary into 1 GiB
-assets because a GitHub Release asset must be under 2 GiB.
+paths before packaging. Gzip parts are capped at 256 MiB by default for
+reliable uploads; the installed executable remains an ordinary signed binary.
 Add Linux or Windows binaries only after those editions are built and verified
 on their native hosts.
 

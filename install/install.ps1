@@ -59,6 +59,14 @@ if ((Test-Path -LiteralPath $target) -and -not $Force) {
     if ($existingVersion -notmatch '^LLVM-CLI ') {
         throw "$target exists and is not LLVM-CLI; use -Force to replace it"
     }
+    if ($existingVersion -match '^LLVM-CLI v?([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)') {
+        $installedNumber = [version]$Matches[1]
+        if ($Version -match '^v?([0-9]+\.[0-9]+\.[0-9]+)$' -and
+            $installedNumber -gt [version]$Matches[1]) {
+            Write-Host "LLVM-CLI $installedNumber is newer than release $Version; keeping $target (use -Force to downgrade)"
+            return
+        }
+    }
 }
 
 $work = Join-Path $InstallDir (".llvm-cli-install-" + [guid]::NewGuid().ToString("N"))
@@ -67,9 +75,10 @@ try {
     $manifestPath = Join-Path $work "llvm-cli-manifest-v1.txt"
     Download-Asset "llvm-cli-manifest-v1.txt" $manifestPath
     $lines = [IO.File]::ReadAllLines($manifestPath)
-    if ($lines.Count -eq 0 -or $lines[0] -cne "llvm-cli-release-v1") {
+    if ($lines.Count -eq 0 -or $lines[0] -cnotin @("llvm-cli-release-v1", "llvm-cli-release-v2")) {
         throw "Unsupported release manifest"
     }
+    $compression = if ($lines[0] -ceq "llvm-cli-release-v2") { "gzip" } else { "none" }
 
     $binaryEntries = @($lines | Where-Object {
         $fields = Get-Fields $_
@@ -79,7 +88,13 @@ try {
         throw "Release $Version has no native $platform binary"
     }
     $binary = Get-Fields $binaryEntries[0]
-    if ($binary.Count -ne 5) { throw "Invalid binary manifest entry" }
+    if ($compression -eq "gzip") {
+        if ($binary.Count -ne 6 -or $binary[5] -cne "gzip") {
+            throw "Invalid compressed binary manifest entry"
+        }
+    } elseif ($binary.Count -ne 5) {
+        throw "Invalid binary manifest entry"
+    }
     [long]$expectedSize = $binary[2]
     $expectedHash = $binary[3]
     [int]$partCount = $binary[4]
@@ -96,8 +111,11 @@ try {
     }
 
     $image = Join-Path $work "llvm.exe"
+    $payload = if ($compression -eq "gzip") {
+        Join-Path $work "llvm.exe.gz"
+    } else { $image }
     $output = [IO.File]::Open(
-        $image, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+        $payload, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
         [IO.FileShare]::None
     )
     try {
@@ -131,6 +149,22 @@ try {
         }
     } finally {
         $output.Dispose()
+    }
+
+    if ($compression -eq "gzip") {
+        $compressed = [IO.File]::OpenRead($payload)
+        $decompressed = [IO.File]::Open(
+            $image, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $gzip = [IO.Compression.GZipStream]::new(
+            $compressed, [IO.Compression.CompressionMode]::Decompress
+        )
+        try { $gzip.CopyTo($decompressed) } finally {
+            $gzip.Dispose()
+            $decompressed.Dispose()
+        }
+        Remove-Item -LiteralPath $payload
     }
 
     if ((Get-Item -LiteralPath $image).Length -ne $expectedSize) {

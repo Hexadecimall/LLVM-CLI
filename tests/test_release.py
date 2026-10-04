@@ -12,7 +12,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT / "tools"))
-from prepare_release import split_binary, validate_host_format  # noqa: E402
+from prepare_release import split_binary, split_gzip_binary, validate_host_format  # noqa: E402
 
 
 class ReleaseInstallerTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.binary = self.root / "fixture-llvm"
         self.binary.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" = --version ]; then echo 'LLVM-CLI test'; exit 0; fi\n"
+            "if [ \"$1\" = --version ]; then echo 'LLVM-CLI 1.7.0'; exit 0; fi\n"
             "exit 1\n",
             encoding="ascii",
         )
@@ -61,13 +61,13 @@ class ReleaseInstallerTests(unittest.TestCase):
         path.write_text(content, encoding="ascii")
         path.chmod(0o755)
 
-    def _install(self, directory):
+    def _install(self, directory, version="v-test", force=False):
         environment = os.environ.copy()
         environment["PATH"] = str(self.fake_bin) + os.pathsep + environment["PATH"]
         environment["LLVM_CLI_TEST_ASSETS"] = str(self.assets)
         return subprocess.run(
-            ["sh", str(PROJECT / "install/install.sh"), "--version", "v-test",
-             "--install-dir", str(directory)],
+            ["sh", str(PROJECT / "install/install.sh"), "--version", version,
+             "--install-dir", str(directory), *(["--force"] if force else [])],
             env=environment, text=True, capture_output=True, timeout=30,
         )
 
@@ -77,6 +77,40 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((directory / "llvm").read_bytes(), self.binary.read_bytes())
         self.assertEqual((directory / "LLVM").read_bytes(), self.binary.read_bytes())
+
+    def test_installs_gzip_parts_as_one_executable(self):
+        for part in self.assets.glob("*.part*"):
+            part.unlink()
+        manifest = ["llvm-cli-release-v2"]
+        manifest.extend(split_gzip_binary(
+            "linux-x86_64", self.binary, self.assets, 17))
+        (self.assets / "llvm-cli-manifest-v1.txt").write_text(
+            "\n".join(manifest) + "\n", encoding="ascii"
+        )
+        directory = self.root / "gzip-installed"
+        result = self._install(directory)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((directory / "llvm").read_bytes(), self.binary.read_bytes())
+
+    def test_keeps_newer_local_version_without_downloading_parts(self):
+        directory = self.root / "newer"
+        directory.mkdir()
+        installed = directory / "llvm"
+        installed.write_text(
+            "#!/bin/sh\necho 'LLVM-CLI 1.8.0'\n", encoding="ascii"
+        )
+        installed.chmod(0o755)
+        for part in self.assets.glob("*.part*"):
+            part.unlink()
+        result = self._install(directory, version="v1.7.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("newer than release", result.stdout)
+        self.assertIn("LLVM-CLI 1.8.0", installed.read_text(encoding="ascii"))
+
+        split_binary("linux-x86_64", self.binary, self.assets, 17)
+        forced = self._install(directory, version="v1.7.0", force=True)
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(installed.read_bytes(), self.binary.read_bytes())
 
     def test_rejects_corrupted_part_without_installing(self):
         first_part = self.assets / "llvm-cli-linux-x86_64.part000"

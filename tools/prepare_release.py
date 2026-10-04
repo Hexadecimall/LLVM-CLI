@@ -8,11 +8,13 @@ import hashlib
 from pathlib import Path
 import struct
 import sys
+import zlib
 
 from audit_public import check_binary, check_source
 
 
 CHUNK_SIZE = 1024 * 1024 * 1024
+GZIP_CHUNK_SIZE = 256 * 1024 * 1024
 COPY_SIZE = 8 * 1024 * 1024
 PLATFORMS = {
     "darwin-arm64",
@@ -109,6 +111,73 @@ def split_binary(platform: str, source: Path, destination: Path,
     ]
 
 
+def split_gzip_binary(platform: str, source: Path, destination: Path,
+                      chunk_size: int = GZIP_CHUNK_SIZE) -> list[str]:
+    """Compress once, split the byte stream, and retain the final binary hash."""
+    if not source.is_file() or source.stat().st_size == 0:
+        raise ValueError(f"missing or empty host binary: {source}")
+    if chunk_size < 1 or chunk_size >= 2 * 1024 * 1024 * 1024:
+        raise ValueError("chunk size must be below GitHub's 2 GiB asset limit")
+
+    total_size = source.stat().st_size
+    full_hash = hashlib.sha256()
+    lines = []
+    output_file = None
+    part_hash = hashlib.sha256()
+    part_size = 0
+
+    def finish_part() -> None:
+        nonlocal output_file, part_hash, part_size
+        if output_file is None:
+            return
+        output_file.close()
+        lines.append(
+            f"part {platform} {len(lines)} {part_size} {part_hash.hexdigest()}"
+        )
+        output_file = None
+        part_hash = hashlib.sha256()
+        part_size = 0
+
+    def write_compressed(data: bytes) -> None:
+        nonlocal output_file, part_size
+        offset = 0
+        while offset < len(data):
+            if output_file is None:
+                if len(lines) >= 999:
+                    raise ValueError("more than 999 parts are not supported")
+                part_name = f"llvm-cli-{platform}.part{len(lines):03d}"
+                output_file = (destination / part_name).open("xb")
+            block = data[offset:offset + chunk_size - part_size]
+            output_file.write(block)
+            part_hash.update(block)
+            part_size += len(block)
+            offset += len(block)
+            if part_size == chunk_size:
+                finish_part()
+
+    compressor = zlib.compressobj(level=6, wbits=31)
+    try:
+        with source.open("rb") as input_file:
+            remaining = total_size
+            while remaining:
+                block = input_file.read(min(COPY_SIZE, remaining))
+                if not block:
+                    raise OSError(f"source changed during packaging: {source}")
+                full_hash.update(block)
+                write_compressed(compressor.compress(block))
+                remaining -= len(block)
+            if input_file.read(1):
+                raise OSError(f"source grew during packaging: {source}")
+        write_compressed(compressor.flush())
+    finally:
+        finish_part()
+    return [
+        f"binary {platform} {total_size} {full_hash.hexdigest()} "
+        f"{len(lines)} gzip",
+        *lines,
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True,
@@ -116,6 +185,8 @@ def main() -> int:
     parser.add_argument("--binary", type=artifact, action="append", required=True,
                         metavar="PLATFORM=PATH",
                         help="one verified native LLVM-CLI executable")
+    parser.add_argument("--gzip", action="store_true",
+                        help="emit v2 gzip-compressed parts (smaller downloads)")
     args = parser.parse_args()
 
     platforms = [platform for platform, _ in args.binary]
@@ -140,9 +211,10 @@ def main() -> int:
         return 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest = ["llvm-cli-release-v1"]
+    manifest = ["llvm-cli-release-v2" if args.gzip else "llvm-cli-release-v1"]
     for platform, source in args.binary:
-        manifest.extend(split_binary(platform, source, output_dir))
+        manifest.extend((split_gzip_binary if args.gzip else split_binary)(
+            platform, source, output_dir))
     (output_dir / "llvm-cli-manifest-v1.txt").write_text(
         "\n".join(manifest) + "\n", encoding="ascii"
     )
