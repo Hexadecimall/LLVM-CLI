@@ -1216,7 +1216,7 @@ void listTools(std::string_view filter = {}) {
 }
 
 void printVersion() {
-  std::cout << "LLVM-CLI 1.6.0\n"
+  std::cout << "LLVM-CLI 1.7.0\n"
                "LLVM 23.1.1\n"
                "Target: arm64-apple-darwin\n";
 }
@@ -1238,6 +1238,7 @@ void printHelp() {
       "  llvm <tool> [arguments]       Run any embedded tool\n"
       "  llvm <compiler> -compile-target <target> [arguments]\n"
       "  llvm build [options] <sources...>  Incremental project build\n"
+      "  llvm clang -incremental file.c -o app  Cache a Clang build\n"
       "  llvm run <tool> [arguments]   Explicit tool invocation\n\n"
       "Cross compilation:\n"
       "  llvm cc -compile-target <arch-os-abi> file.c -c -o file.o\n"
@@ -1434,6 +1435,7 @@ bool printExtras(std::string requested = {}) {
         "  llvm build                  Incremental C/C++ project build\n\n"
         "Added flag (compiler commands):\n"
         "  llvm <compiler> -compile-target <arch-os-abi> [arguments]\n"
+        "  llvm clang|c++ -incremental [Clang arguments]\n"
         "  Applies to cc, c++, cpp, clang, clang++, clang-cpp, "
         "clang-cl, flang, flang-new, fortran, and llc.\n"
         "  Use llvm extras <compiler> for its mapping.\n\n"
@@ -1460,6 +1462,8 @@ bool printExtras(std::string requested = {}) {
               << "  syntax: llvm " << requested
               << " -compile-target <target> [arguments]\n"
               << "  targets: llvm compile-targets\n";
+    if (canonical == "clang" || canonical == "clang++")
+      std::cout << "  added flag: -incremental (optional -build-dir PATH)\n";
   } else {
     std::cout << "  added flags: none\n"
               << "  syntax: llvm " << requested << " [arguments]\n";
@@ -1896,6 +1900,45 @@ int main(int argc, char **argv) {
   const bool dispatcher = invokedAs == "LLVM" || invokedAs == "llvm" ||
       (resolveTool(invokedAs).empty() && !hasScript(invokedAs) && argc >= 2 &&
        (!resolveTool(argv[1]).empty() || hasScript(argv[1])));
+  const BuildInvoke invokeBuildCompiler = [&](std::string_view compiler,
+      std::string_view target, const std::vector<std::string> &options) {
+    CompileTarget parsed;
+    if (!target.empty() && !parseCompileTarget(target, parsed)) {
+      std::cerr << "LLVM build: invalid target '" << target << "'\n";
+      return 2;
+    }
+    if (target.empty() || parsed.Os == "macos")
+      configureAppleSdk();
+    ActiveCompileTarget = target.empty() ? "" : parsed.Requested;
+    const pid_t child = ::fork();
+    if (child < 0) {
+      std::cerr << "LLVM build: cannot start embedded compiler: "
+                << std::strerror(errno) << '\n';
+      return 1;
+    }
+    if (child == 0) {
+      std::vector<std::string> storage{"llvm"};
+      storage.insert(storage.end(), options.begin(), options.end());
+      std::vector<char *> arguments;
+      for (std::string &option : storage)
+        arguments.push_back(option.data());
+      arguments.push_back(nullptr);
+      const int result = runBundle("llvm", std::string(compiler),
+          static_cast<int>(storage.size()), arguments.data(), 1, {},
+          target.empty() ? nullptr : &parsed);
+      std::cout.flush();
+      std::cerr.flush();
+      ::_exit(result);
+    }
+    int status = 0;
+    while (::waitpid(child, &status, 0) < 0) {
+      if (errno == EINTR)
+        continue;
+      return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) :
+           WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+  };
   std::string requested;
   int firstArgument = 1;
   if (dispatcher) {
@@ -1927,45 +1970,7 @@ int main(int argc, char **argv) {
     }
     if (command == "build") {
       return runIncrementalBuild(argc, argv, 2, MainExecutablePath,
-          [&](std::string_view compiler, std::string_view target,
-              const std::vector<std::string> &options) {
-        CompileTarget parsed;
-        if (!target.empty() && !parseCompileTarget(target, parsed)) {
-          std::cerr << "LLVM build: invalid target '" << target << "'\n";
-          return 2;
-        }
-        if (target.empty() || parsed.Os == "macos")
-          configureAppleSdk();
-        ActiveCompileTarget = target.empty() ? "" : parsed.Requested;
-        const pid_t child = ::fork();
-        if (child < 0) {
-          std::cerr << "LLVM build: cannot start embedded compiler: "
-                    << std::strerror(errno) << '\n';
-          return 1;
-        }
-        if (child == 0) {
-          std::vector<std::string> storage{"llvm"};
-          storage.insert(storage.end(), options.begin(), options.end());
-          std::vector<char *> arguments;
-          for (std::string &option : storage)
-            arguments.push_back(option.data());
-          arguments.push_back(nullptr);
-          const int result = runBundle("llvm", std::string(compiler),
-              static_cast<int>(storage.size()), arguments.data(), 1, {},
-              target.empty() ? nullptr : &parsed);
-          std::cout.flush();
-          std::cerr.flush();
-          ::_exit(result);
-        }
-        int status = 0;
-        while (::waitpid(child, &status, 0) < 0) {
-          if (errno == EINTR)
-            continue;
-          return 1;
-        }
-        return WIFEXITED(status) ? WEXITSTATUS(status) :
-               WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
-      });
+          invokeBuildCompiler);
     }
     if (command == "extras") {
       if (!printExtras(argc >= 3 ? argv[2] : "")) {
@@ -2100,6 +2105,12 @@ int main(int argc, char **argv) {
                    "-target/--target, not both\n";
       return 2;
     }
+    if ((requested == "clang" || requested == "clang++") &&
+        (hasArgument(argc, argv, firstArgument, "-incremental") ||
+         hasArgument(argc, argv, firstArgument, "--incremental")))
+      return runIncrementalClang(argc, argv, firstArgument, requested,
+          selectedTarget ? compileTarget.Requested : "", MainExecutablePath,
+          invokeBuildCompiler);
     return runBundle(bundle, requested, argc, argv, firstArgument, {},
                      selectedTarget ? &compileTarget : nullptr);
   }

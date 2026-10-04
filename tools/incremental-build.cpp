@@ -1,5 +1,6 @@
 #include "incremental-build.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -130,7 +131,8 @@ void printUsage() {
 
 int runIncrementalBuild(int argc, char **argv, int firstArgument,
                         std::string_view executablePath,
-                        const BuildInvoke &invoke) {
+                        const BuildInvoke &invoke,
+                        std::string_view compiler) {
   std::string target;
   fs::path output = "a.out";
   fs::path buildDirectory = ".llvm-cli-build";
@@ -209,7 +211,8 @@ int runIncrementalBuild(int argc, char **argv, int firstArgument,
   bool rebuilt = false;
   bool linkCxx = false;
   for (const fs::path &source : sources) {
-    const bool cxx = usesCxx(source);
+    const bool cxx = compiler.empty() ? usesCxx(source) :
+                     compiler == "clang++";
     linkCxx |= cxx;
     char suffix[17]{};
     std::snprintf(suffix, sizeof(suffix), "%016llx",
@@ -232,7 +235,8 @@ int runIncrementalBuild(int argc, char **argv, int firstArgument,
       continue;
     }
     std::cout << "build: compile " << source.string() << '\n' << std::flush;
-    const int status = invoke(cxx ? "clang++" : "clang", target, command);
+    const int status = invoke(compiler.empty() ?
+        (cxx ? "clang++" : "clang") : compiler, target, command);
     if (status != 0)
       return status;
     if (!fs::is_regular_file(object)) {
@@ -266,8 +270,8 @@ int runIncrementalBuild(int argc, char **argv, int firstArgument,
     return 0;
   }
   std::cout << "build: link " << output.string() << '\n' << std::flush;
-  const int status = invoke(linkCxx ? "clang++" : "clang", target,
-                            linkCommand);
+  const int status = invoke(compiler.empty() ?
+      (linkCxx ? "clang++" : "clang") : compiler, target, linkCommand);
   if (status != 0)
     return status;
   if (!writeText(linkKeyFile, linkKey)) {
@@ -275,4 +279,188 @@ int runIncrementalBuild(int argc, char **argv, int firstArgument,
     return 1;
   }
   return 0;
+}
+
+int runIncrementalClang(int argc, char **argv, int firstArgument,
+                        std::string_view compiler, std::string_view target,
+                        std::string_view executable,
+                        const BuildInvoke &invoke) {
+  fs::path buildDirectory = ".llvm-cli-build";
+  fs::path output;
+  bool compileOnly = false;
+  std::vector<std::string> compilerFlags;
+  std::vector<std::string> linkerFlags;
+  std::vector<std::string> original;
+  std::vector<std::string> sources;
+  for (int index = firstArgument; index < argc; ++index) {
+    const std::string_view option(argv[index]);
+    if (option == "-incremental" || option == "--incremental")
+      continue;
+    if (option == "-build-dir" || option == "--build-dir") {
+      if (++index >= argc || !*argv[index]) {
+        std::cerr << "LLVM: -build-dir requires a path\n";
+        return 2;
+      }
+      buildDirectory = argv[index];
+      continue;
+    }
+    if (option == "-o") {
+      if (++index >= argc || !*argv[index]) {
+        std::cerr << "LLVM: -o requires a path\n";
+        return 2;
+      }
+      output = argv[index];
+      original.emplace_back("-o");
+      original.emplace_back(argv[index]);
+      continue;
+    }
+    if (option == "-c") {
+      compileOnly = true;
+      original.emplace_back(option);
+      continue;
+    }
+    if (option == "-I" || option == "-D" || option == "-U" ||
+        option == "-isystem" || option == "-include" ||
+        option == "-iquote" || option == "-F" || option == "-iframework" ||
+        option == "-L" || option == "-l" || option == "-Xlinker" ||
+        option == "-framework") {
+      if (++index >= argc) {
+        std::cerr << "LLVM: " << option << " requires a value\n";
+        return 2;
+      }
+      const std::string value(argv[index]);
+      const bool linkOnly = option == "-L" || option == "-l" ||
+          option == "-Xlinker" || option == "-framework";
+      auto &flags = linkOnly ? linkerFlags : compilerFlags;
+      flags.emplace_back(option);
+      flags.push_back(value);
+      original.emplace_back(option);
+      original.push_back(value);
+      continue;
+    }
+    if (option.starts_with("-L") || option.starts_with("-l") ||
+        option.starts_with("-Wl,") || option.starts_with("-fuse-ld=") ||
+        option == "-static" || option == "-shared" ||
+        option == "-pie" || option == "-no-pie" ||
+        option == "-nostdlib" || option == "-nodefaultlibs" ||
+        option == "-nostartfiles" || option == "-rdynamic" ||
+        option == "-dynamic") {
+      linkerFlags.emplace_back(option);
+      original.emplace_back(option);
+      continue;
+    }
+    if (option == "-pthread" || option.starts_with("-flto") ||
+        option.starts_with("-fsanitize=") ||
+        option.starts_with("-stdlib=")) {
+      compilerFlags.emplace_back(option);
+      linkerFlags.emplace_back(option);
+      original.emplace_back(option);
+      continue;
+    }
+    if (option.starts_with("-I") || option.starts_with("-D") ||
+        option.starts_with("-U") || option.starts_with("-F") ||
+        option.starts_with("-O") || option.starts_with("-g") ||
+        option.starts_with("-std=") || option.starts_with("-f") ||
+        option.starts_with("-m") || option.starts_with("-W") ||
+        option == "-pedantic" || option == "-pedantic-errors" ||
+        option == "-pipe") {
+      compilerFlags.emplace_back(option);
+      original.emplace_back(option);
+      continue;
+    }
+    if (option.starts_with('-')) {
+      std::cerr << "LLVM: unsupported incremental compiler option '"
+                << option << "'; run without -incremental for the full "
+                   "Clang driver\n";
+      return 2;
+    }
+    const fs::path source = fs::absolute(option).lexically_normal();
+    if (!isSource(source) || !fs::is_regular_file(source)) {
+      std::cerr << "LLVM: -incremental expects source files, not '"
+                << option << "'; run without -incremental for other "
+                   "link inputs\n";
+      return 2;
+    }
+    sources.push_back(source.string());
+    original.emplace_back(option);
+  }
+  if (sources.empty()) {
+    std::cerr << "LLVM: -incremental requires a source file\n";
+    return 2;
+  }
+  if (compileOnly) {
+    if (sources.size() != 1) {
+      std::cerr << "LLVM: -incremental -c currently requires one source "
+                   "per command\n";
+      return 2;
+    }
+    if (output.empty())
+      output = fs::path(sources.front()).stem().string() + ".o";
+    output = fs::absolute(output).lexically_normal();
+    buildDirectory = fs::absolute(buildDirectory).lexically_normal();
+    std::error_code error;
+    fs::create_directories(buildDirectory, error);
+    if (!error)
+      fs::create_directories(output.parent_path(), error);
+    if (error) {
+      std::cerr << "LLVM: cannot create incremental build directory: "
+                << error.message() << '\n';
+      return 1;
+    }
+    char suffix[17]{};
+    std::snprintf(suffix, sizeof(suffix), "%016llx",
+                  static_cast<unsigned long long>(pathHash(
+                      sources.front() + output.string())));
+    const fs::path depfile = buildDirectory / (std::string(suffix) + ".d");
+    const fs::path keyfile = buildDirectory / (std::string(suffix) + ".key");
+    std::vector<std::string> command = original;
+    if (std::find(command.begin(), command.end(), "-o") == command.end()) {
+      command.emplace_back("-o");
+      command.push_back(output.string());
+    }
+    command.emplace_back("-MMD");
+    command.emplace_back("-MF");
+    command.push_back(depfile.string());
+    const std::string key = cacheKey(command, executable) + "|" +
+                            std::string(target) + "|" + std::string(compiler);
+    if (!needsCompile(output, depfile, keyfile, key)) {
+      std::cout << "build: unchanged " << sources.front() << '\n';
+      return 0;
+    }
+    std::cout << "build: compile " << sources.front() << '\n' << std::flush;
+    const int status = invoke(compiler, target, command);
+    if (status != 0)
+      return status;
+    if (!fs::is_regular_file(output) || !writeText(keyfile, key)) {
+      std::cerr << "LLVM: incremental compiler output is missing or "
+                   "cannot be recorded\n";
+      return 1;
+    }
+    return 0;
+  }
+  std::vector<std::string> translated{"llvm", "build", "--build-dir",
+                                      buildDirectory.string()};
+  if (!target.empty()) {
+    translated.emplace_back("--target");
+    translated.emplace_back(target);
+  }
+  if (!output.empty()) {
+    translated.emplace_back("--output");
+    translated.emplace_back(output.string());
+  }
+  for (const std::string &flag : compilerFlags) {
+    translated.emplace_back("--cflag");
+    translated.push_back(flag);
+  }
+  for (const std::string &flag : linkerFlags) {
+    translated.emplace_back("--ldflag");
+    translated.push_back(flag);
+  }
+  translated.insert(translated.end(), sources.begin(), sources.end());
+  std::vector<char *> arguments;
+  for (std::string &argument : translated)
+    arguments.push_back(argument.data());
+  return runIncrementalBuild(static_cast<int>(arguments.size()),
+                             arguments.data(), 2, executable, invoke,
+                             compiler);
 }

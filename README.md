@@ -173,7 +173,16 @@ header dependencies, and links again only when inputs or flags changed:
 llvm build --output app src/main.cpp src/helper.cpp
 llvm build --target x86_64-linux-musl --output app-linux src/main.c
 llvm build --release --output app src/main.cpp --cflag=-Iinclude --ldflag=-lm
+llvm clang -incremental src/main.c -o app
+llvm c++ -incremental -compile-target x86_64-linux-musl src/main.cpp -o app-linux
 ```
+
+`-incremental` also works on direct `llvm clang`, `llvm clang++`, `llvm cc`,
+and `llvm c++` invocations. It accepts ordinary source, optimization,
+include, library, and linker flags; `-build-dir PATH` changes the durable
+object location. With `-c`, use one source per command. Unsupported driver
+options report an error instead of changing compilation semantics; omit
+`-incremental` to pass those invocations straight to Clang.
 
 Use `--build-dir PATH` to choose another project-local build directory, and
 add `.llvm-cli-build/` to the project's `.gitignore`. `--release` enables

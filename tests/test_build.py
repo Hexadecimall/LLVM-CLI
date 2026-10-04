@@ -14,6 +14,56 @@ BINARY = os.environ.get("LLVM_CLI_BINARY")
 
 @unittest.skipUnless(BINARY, "set LLVM_CLI_BINARY to the built host executable")
 class IncrementalBuildTests(unittest.TestCase):
+    def test_direct_clang_incremental_reuses_unchanged_objects(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            header = root / "answer.h"
+            source = root / "main.c"
+            header.write_text("#define ANSWER 42\n")
+            source.write_text('#include "answer.h"\nint main(void) { return ANSWER - 42; }\n')
+            command = [BINARY, "clang", "-incremental", "-build-dir",
+                       str(root / "objects"), "-I", str(root), str(source),
+                       "-O2", "-o", str(root / "app")]
+            first = subprocess.run(command, text=True, capture_output=True,
+                                   timeout=180)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertIn("build: compile", first.stdout)
+            self.assertEqual(subprocess.run([str(root / "app")], timeout=5).returncode, 0)
+
+            second = subprocess.run(command, text=True, capture_output=True,
+                                    timeout=180)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertNotIn("build: compile", second.stdout)
+            self.assertIn("build: up to date", second.stdout)
+
+            header.write_text("#define ANSWER 43\n")
+            third = subprocess.run(command, text=True, capture_output=True,
+                                   timeout=180)
+            self.assertEqual(third.returncode, 0, third.stderr)
+            self.assertIn("build: compile", third.stdout)
+            self.assertEqual(subprocess.run([str(root / "app")], timeout=5).returncode, 1)
+
+    def test_direct_clang_incremental_object(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            source = root / "main.c"
+            source.write_text("int answer(void) { return 42; }\n")
+            command = [BINARY, "clang", "-incremental", "-build-dir",
+                       str(root / "objects"), "-c", str(source), "-o",
+                       str(root / "main.o")]
+            first = subprocess.run(command, text=True, capture_output=True,
+                                   timeout=180)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue((root / "main.o").is_file())
+            second = subprocess.run(command, text=True, capture_output=True,
+                                    timeout=180)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("build: unchanged", second.stdout)
+
     def test_only_changed_header_dependents_recompile(self):
         validation = PROJECT / "validation"
         validation.mkdir(exist_ok=True)

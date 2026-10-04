@@ -11,4 +11,10 @@ using BuildInvoke = std::function<int(
 
 int runIncrementalBuild(int argc, char **argv, int firstArgument,
                         std::string_view executable,
+                        const BuildInvoke &invoke,
+                        std::string_view compiler = {});
+
+int runIncrementalClang(int argc, char **argv, int firstArgument,
+                        std::string_view compiler, std::string_view target,
+                        std::string_view executable,
                         const BuildInvoke &invoke);
