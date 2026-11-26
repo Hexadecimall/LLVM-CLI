@@ -55,6 +55,14 @@ Current verification:
   target-specific libc++ configuration.
 - No native Linux or Windows LLVM-CLI executable has been built or run yet.
 
+The [native probe run](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45874191759)
+executed locally cross-built C++ programs on Ubuntu 24.04 and Windows Server
+2022. Both passed constructor/destructor, exception, thread, and thread-local
+storage checks with an empty `PATH`. Linux also passed the embedded-object
+loader probe, including two worker threads with independent TLS and module
+deinitialization. GitHub performed no compilation. The downloadable validation
+pre-release contains test programs, not installable LLVM-CLI host editions.
+
 The current host bootstrap shares the LLVM 23.1.6 source with the macOS build.
 Idle generated macOS inputs can be frozen with verified Zstandard frames to
 reserve space for another host without deleting its incremental build inputs.
