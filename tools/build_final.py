@@ -169,6 +169,9 @@ def main() -> int:
     parser.add_argument("--reuse-pack", action="store_true",
                         help="reuse a completed pack when payload resources have not changed")
     args = parser.parse_args()
+    if not args.check:
+        from build_cache import restore_build_cache
+        restore_build_cache(BUILD)
     missing = missing_build_inputs()
     if missing:
         print("LLVM-CLI: native macOS build inputs are incomplete:", file=sys.stderr)

@@ -174,3 +174,23 @@ the exact paths and sizes, and distinguish build inputs from release packages
 and old snapshots. Remove only the approved batch, then measure actual free
 space; APFS clones and hard links can make apparent sizes misleading. This
 project deliberately has no blanket `make clean` target.
+
+## Switching host build inputs within the storage cap
+
+`llvm python tools/build_cache.py freeze BUILD_DIRECTORY` stores eligible
+generated objects, archives, precompiled headers, dependency records, and
+generated tables as Zstandard frames. It supports only `build-work/.../build`
+directories with a CMake cache. Run it only while that build is idle.
+Every frame is read back and checked against the original SHA-256; its journal
+entry is flushed before the raw generated file is retired. Source files,
+native host executables, symlinks, and shared hard links remain in place.
+The compressed data lives beside the build under `build-frozen/`, inside the
+durable workspace rather than a system cache.
+
+The macOS build entry points restore frozen inputs before compiling or linking.
+For an explicit restore, use `llvm python tools/build_cache.py thaw BUILD_DIRECTORY`.
+Restoration checks the digest, preserves modes and timestamps, and retires a
+frame only after its raw input has been restored. It refuses to overwrite a
+changed raw input. `status` reports the frozen set without restoring it.
+If another host occupies the available space, freeze that idle host first.
+Read-only input checks do not thaw files.

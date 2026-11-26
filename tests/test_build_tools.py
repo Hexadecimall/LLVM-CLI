@@ -14,10 +14,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import build_all_tool_bundles as bundles  # noqa: E402
 import build_final as final  # noqa: E402
 import build_native_bundles as native  # noqa: E402
+import macos_build as macos  # noqa: E402
 from prepare_native_payload import static_recipes  # noqa: E402
 
 
 class BuildInputTests(unittest.TestCase):
+    def test_packer_signs_its_output_after_linking(self):
+        with tempfile.TemporaryDirectory() as scratch, \
+             patch.object(macos.subprocess, "check_output", return_value="host-tool\n"), \
+             patch.object(macos, "run") as run:
+            volume = Path(scratch)
+            macos.build_packer(volume, {})
+            self.assertEqual(len(run.call_args_list), 2)
+            output = volume / "tools/llvm-pack"
+            self.assertEqual(run.call_args_list[0].args[0][-2:], ["-o", output])
+            self.assertEqual(run.call_args_list[1].args[0],
+                             ["codesign", "-s", "-", "--force", output])
+
+    def test_cross_runtime_stages_archives_without_signing_a_program(self):
+        with tempfile.TemporaryDirectory() as scratch, \
+             patch.object(macos, "run") as run:
+            volume = Path(scratch)
+            (volume / "final").mkdir()
+            (volume / "final/LLVM").touch()
+            libraries = volume / "runtimes-x86_64-macos/lib"
+            libraries.mkdir(parents=True)
+            names = ("libc++.a", "libc++abi.a", "libunwind.a")
+            for name in names:
+                (libraries / name).write_bytes(b"archive fixture " + name.encode())
+            macos.build_cross_macos_runtime(volume, {}, 2)
+            self.assertEqual(len(run.call_args_list), 2)
+            self.assertTrue(all(call.args[0][0] == "cmake" for call in run.call_args_list))
+            for name in names:
+                self.assertTrue((volume / "overlay/root/targets/x86_64-macos/lib" / name)
+                                .samefile(libraries / name))
+
     def test_reconfigured_tree_ignores_obsolete_link_recipes(self):
         with tempfile.TemporaryDirectory() as scratch:
             build = Path(scratch)

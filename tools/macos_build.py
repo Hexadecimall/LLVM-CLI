@@ -12,6 +12,7 @@ import sys
 
 from prepare_llvm_source import prepare, PROJECT, RELEASE
 from recovered_paths import relocate
+from build_cache import restore_build_cache
 
 
 def run(command, environment=None, logfile=None):
@@ -209,6 +210,7 @@ def build_packer(volume, environment):
          runtime / "lib/libc++.a", runtime / "lib/libc++abi.a",
          runtime / "lib/libunwind.a", "-o", output], environment,
         volume / "logs/packer-build.log")
+    run(["codesign", "-s", "-", "--force", output], environment)
 
 
 def build_cross_macos_runtime(volume, environment, jobs):
@@ -250,7 +252,6 @@ def build_cross_macos_runtime(volume, environment, jobs):
         if target.exists():
             target.unlink()
         os.link(runtime / "lib" / name, target)
-    run(["codesign", "-s", "-", "--force", output], environment)
 
 
 def build_compiler_runtime(volume, environment, jobs):
@@ -396,6 +397,7 @@ def main():
         retire_duplicates(volume)
         return
     prepare(volume)
+    restore_build_cache(volume / "build")
     auxiliary = args.runtime or args.packer or args.compiler_runtime or args.public_runtime or args.cross_macos_runtime or args.final
     environment = (build_environment(volume) if auxiliary and not args.build
                    else configure(volume))

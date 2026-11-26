@@ -16,6 +16,7 @@ from materialize_archive import materialize
 
 
 def static_recipes(build):
+    build = Path(build).resolve()
     result = {}
     for recipe in active_link_files(build):
         tokens = shlex.split(recipe.read_text())
@@ -287,6 +288,8 @@ def main():
     if args.available and args.stage:
         parser.error("--stage requires the complete SDK archive build")
     volume = workspace()
+    from build_cache import restore_build_cache
+    restore_build_cache(volume / "build")
     libraries(volume, args.available, args.jobs)
     if args.stage:
         stage(volume)

@@ -27,6 +27,7 @@ def active_link_files(build):
 
 
 def recipes(build):
+    build = Path(build).resolve()
     result = {}
     for path in active_link_files(build):
         tokens = shlex.split(path.read_text())
@@ -54,6 +55,8 @@ def main():
     if not 1 <= args.jobs <= 8:
         parser.error("--jobs must be between 1 and 8")
     volume = workspace()
+    from build_cache import restore_build_cache
+    restore_build_cache(volume / "build")
     build = volume / "build"
     environment = build_environment(volume)
     environment.update({"LLVM_CLI_NATIVE_BUILD_DIR": str(build),
