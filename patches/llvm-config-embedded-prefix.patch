@@ -1,0 +1,60 @@
+--- a/llvm/tools/llvm-config/llvm-config.cpp
++++ b/llvm/tools/llvm-config/llvm-config.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include "llvm/Config/llvm-config.h"
+ #include "llvm/ADT/STLExtras.h"
++#include "llvm/ADT/SmallVector.h"
+ #include "llvm/ADT/StringExtras.h"
+ #include "llvm/ADT/StringMap.h"
+ #include "llvm/ADT/StringRef.h"
+@@ -248,10 +249,38 @@
+ 
+ /// Compute the path to the main executable.
+ static std::string getExecutablePath(const char *Argv0) {
++  if (StringRef(Argv0).starts_with("/__llvm/bin/"))
++    return Argv0;
+   // This just needs to be some symbol in the binary; C++ doesn't
+   // allow taking the address of ::main however.
+   void *P = (void *)(intptr_t)getExecutablePath;
+   return sys::fs::getMainExecutable(Argv0, P);
++}
++
++static void printSystemLibraries(raw_ostream &OS, bool Embedded) {
++  if (!Embedded) {
++    OS << LLVM_SYSTEM_LIBS;
++    return;
++  }
++  SmallVector<StringRef, 8> Libraries;
++  StringRef(LLVM_SYSTEM_LIBS).split(Libraries, ' ', -1, false);
++  bool First = true;
++  for (StringRef Library : Libraries) {
++    std::string Name = Library.starts_with("-l")
++                           ? ("lib" + Library.drop_front(2) + ".a").str()
++                           : sys::path::filename(Library).str();
++    const std::string Path = "/__llvm/deps/lib/" + Name;
++    const bool Bundled = sys::fs::exists(Path);
++    OS << (First ? "" : " ") << (Bundled ? StringRef(Path) : Library);
++    First = false;
++    if (Bundled && Name == "libxml2.a") {
++      for (StringRef Extra : {"libiconv.a", "libcharset.a"}) {
++        const std::string Dependency = "/__llvm/deps/lib/" + Extra.str();
++        if (sys::fs::exists(Dependency))
++          OS << ' ' << Dependency;
++      }
++    }
++  }
+ }
+ 
+ /// Expand the semi-colon delimited LLVM_DYLIB_COMPONENTS into
+@@ -761,7 +790,9 @@
+       // Output system libraries only if linking against a static
+       // library (since the shared library links to all system libs
+       // already)
+-      OS << (LinkMode == LinkModeStatic ? LLVM_SYSTEM_LIBS : "") << '\n';
++      if (LinkMode == LinkModeStatic)
++        printSystemLibraries(OS, StringRef(argv[0]).starts_with("/__llvm/bin/"));
++      OS << '\n';
+     }
+   } else if (!Components.empty()) {
+     WithColor::error(errs(), "llvm-config")

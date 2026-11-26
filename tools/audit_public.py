@@ -9,12 +9,12 @@ import sys
 
 
 PROJECT = Path(__file__).resolve().parent.parent
-EXCLUDED = {"recovered", "dependency-bundles", "dependency-objects",
+EXCLUDED = {"recovered", "dependency-bundles", "dependency-objects", "build-work",
             "validation", "host-build", "release-assets", "build",
             "__pycache__", ".git"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".py", ".md",
                    ".txt", ".f90", ".sh", ".ps1", ".json", ".yml",
-                   ".yaml", ".toml"}
+                   ".yaml", ".toml", ".cmake", ".patch"}
 HOME = Path.home()
 USERNAME = HOME.name.encode()
 SOURCE_PATTERNS = (

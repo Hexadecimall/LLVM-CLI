@@ -1,0 +1,18 @@
+Darwin target resources reuse Zig 0.17.0's libc/include/any-darwin-any,
+and libc/darwin/libSystem.tbd without modification. LLVM-CLI generates Clang
+target metadata using the upstream SDKSettings.json version.
+Source: https://github.com/ziglang/zig/tree/0.17.0/lib/libc
+
+Individual header copyright and license notices remain in each embedded file.
+This product includes software developed by the University of California,
+Berkeley and its contributors.
+APSL-covered source is available under the Apple Public Source License 2.0.
+The complete header source and text stub are embedded as readable files under
+/__llvm/targets/macos. A per-file SHA-256 inventory is embedded at
+/__llvm/share/llvm-cli/darwin-resources.json.
+
+This is a C library target resource, not a complete Apple framework SDK.
+
+The supplementary os/os_sync_wait_on_address.h header is Copyright (c) 2016
+Apple Inc., licensed under Apache License 2.0 as stated in the header. This
+public Darwin synchronization interface is needed by LLVM 23's C++ runtime.

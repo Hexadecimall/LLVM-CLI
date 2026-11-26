@@ -1,0 +1,4 @@
+The embedded CA certificate bundle is reused from ca-certificates' Mozilla
+CA store, distributed by https://curl.se/docs/caextract.html.
+The Mozilla CA store is licensed under the Mozilla Public License 2.0.
+Certificate provenance and extraction date are retained in cacert.pem.

@@ -78,6 +78,24 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual((directory / "llvm").read_bytes(), self.binary.read_bytes())
         self.assertEqual((directory / "LLVM").read_bytes(), self.binary.read_bytes())
 
+    def test_part_callback_reuses_space_after_each_completed_part(self):
+        uploaded = []
+        def upload(path):
+            self.assertEqual(len(list(self.assets.glob("*.part*"))), 1)
+            uploaded.append(path.read_bytes())
+            path.unlink()
+        for part in self.assets.glob("*.part*"):
+            part.unlink()
+        for splitter in (split_binary, split_gzip_binary):
+            uploaded.clear()
+            splitter("linux-x86_64", self.binary, self.assets, 17, on_part=upload)
+            data = b"".join(uploaded)
+            if splitter == split_gzip_binary:
+                import gzip
+                data = gzip.decompress(data)
+            self.assertEqual(data, self.binary.read_bytes())
+            self.assertFalse(list(self.assets.glob("*.part*")))
+
     def test_installs_gzip_parts_as_one_executable(self):
         for part in self.assets.glob("*.part*"):
             part.unlink()

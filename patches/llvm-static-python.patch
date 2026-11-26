@@ -1,0 +1,16 @@
+--- a/lldb/cmake/modules/FindPythonAndSwig.cmake
++++ b/lldb/cmake/modules/FindPythonAndSwig.cmake
+@@ -67,6 +67,13 @@
+                                       LLDB_ENABLE_SWIG)
+ endif()
+ 
++set(LLDB_PYTHON_EXTRA_STATIC_LIBRARIES "" CACHE STRING
++    "Additional libraries required by statically linked Python")
++if(PYTHONANDSWIG_FOUND AND Python3_LIBRARIES MATCHES "\\.a($|;)" AND
++   LLDB_PYTHON_EXTRA_STATIC_LIBRARIES)
++  list(APPEND Python3_LIBRARIES ${LLDB_PYTHON_EXTRA_STATIC_LIBRARIES})
++endif()
++
+ if (WIN32)
+   set(LLDB_RECOMMENDED_PYTHON "3.11")
+   if(PYTHONANDSWIG_FOUND AND "${Python3_VERSION}" VERSION_LESS "${LLDB_RECOMMENDED_PYTHON}")

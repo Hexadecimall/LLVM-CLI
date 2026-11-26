@@ -91,6 +91,7 @@ is_newer_version() {
 
 case "$(uname -s):$(uname -m)" in
     Darwin:arm64) platform=darwin-arm64 ;;
+    Darwin:x86_64) platform=darwin-x86_64 ;;
     Linux:x86_64) platform=linux-x86_64 ;;
     Linux:aarch64|Linux:arm64) platform=linux-aarch64 ;;
     *) fail "no native release for $(uname -s)/$(uname -m)" ;;

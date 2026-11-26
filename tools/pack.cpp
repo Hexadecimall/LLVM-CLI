@@ -10,7 +10,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <sys/stat.h>
@@ -59,61 +61,114 @@ struct PendingEntry {
   std::string RelativePath;
   llvm_pack::EntryType Type;
   std::uint32_t Mode;
+  bool Precompressed = false;
 };
+
+int compressBundle(const fs::path &source, const fs::path &destination) {
+  std::ifstream input(source, std::ios::binary | std::ios::ate);
+  if (!input || input.tellg() <= 0)
+    return 1;
+  std::vector<char> bytes(static_cast<std::size_t>(input.tellg()));
+  input.seekg(0);
+  input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!input)
+    return 1;
+  std::vector<char> compressed(ZSTD_compressBound(bytes.size()));
+  const std::size_t size = ZSTD_compress(compressed.data(), compressed.size(),
+                                       bytes.data(), bytes.size(), 9);
+  if (ZSTD_isError(size))
+    return 1;
+  std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+  if (!writeAll(output, compressed.data(), size))
+    return 1;
+  output.close();
+  fs::permissions(destination, fs::status(source).permissions());
+  std::cout << bytes.size() << " -> " << size << " bytes\n";
+  return 0;
+}
 
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    std::cerr << "usage: llvm-pack <root> <output>\n";
+  if (argc == 4 && std::string_view(argv[1]) == "--compress")
+    return compressBundle(argv[2], argv[3]);
+  if (argc != 3 && argc != 4) {
+    std::cerr << "usage: llvm-pack <root> <output> [overlay-root]\n";
     return 2;
   }
 
-  const fs::path root = fs::canonical(argv[1]);
   std::vector<PendingEntry> entries;
+  std::unordered_map<std::string, std::size_t> byPath;
+  std::unordered_set<std::string> excluded;
+  std::vector<fs::path> roots{fs::canonical(argv[1])};
+  if (argc == 4) {
+    roots.push_back(fs::canonical(argv[3]));
+    std::ifstream exclusions(roots.back() / ".pack-exclude");
+    for (std::string line; std::getline(exclusions, line);)
+      if (!line.empty())
+        excluded.insert(std::move(line));
+  }
 
   std::error_code error;
-  for (fs::recursive_directory_iterator iterator{
-           root, fs::directory_options::skip_permission_denied, error},
-       end;
-       iterator != end; iterator.increment(error)) {
-    if (error) {
-      std::cerr << "llvm-pack: traversal failed: " << error.message() << '\n';
-      return 1;
+  for (std::size_t layer = 0; layer < roots.size(); ++layer) {
+    const fs::path &root = roots[layer];
+    for (fs::recursive_directory_iterator
+             iterator{root, fs::directory_options::skip_permission_denied,
+                      error},
+         end;
+         iterator != end; iterator.increment(error)) {
+      if (error) {
+        std::cerr << "llvm-pack: traversal failed: " << error.message() << '\n';
+        return 1;
+      }
+
+      const fs::file_status status = iterator->symlink_status(error);
+      if (error) {
+        std::cerr << "llvm-pack: stat failed: " << error.message() << '\n';
+        return 1;
+      }
+
+      llvm_pack::EntryType type;
+      if (fs::is_symlink(status))
+        type = llvm_pack::EntryType::Symlink;
+      else if (fs::is_directory(status))
+        type = llvm_pack::EntryType::Directory;
+      else if (fs::is_regular_file(status))
+        type = llvm_pack::EntryType::File;
+      else
+        continue;
+
+      std::string relative =
+          iterator->path().lexically_relative(root).generic_string();
+      const bool precompressed = type == llvm_pack::EntryType::File &&
+          relative.starts_with("bundles/") && relative.ends_with(".bundle.zst");
+      if (precompressed)
+        relative.resize(relative.size() - 4);
+      if (relative == ".pack-exclude" ||
+          (layer == 0 && excluded.contains(relative)))
+        continue;
+      if (relative.empty() || relative.size() > UINT16_MAX) {
+        std::cerr << "llvm-pack: invalid path: " << relative << '\n';
+        return 1;
+      }
+
+      struct stat info{};
+      if (::lstat(iterator->path().c_str(), &info) != 0) {
+        std::cerr << "llvm-pack: lstat failed for " << relative << ": "
+                  << std::strerror(errno) << '\n';
+        return 1;
+      }
+
+      PendingEntry pending{iterator->path(), relative, type,
+                           static_cast<std::uint32_t>(info.st_mode & 07777),
+                           precompressed};
+      if (const auto found = byPath.find(relative); found != byPath.end())
+        entries[found->second] = std::move(pending);
+      else {
+        byPath.emplace(relative, entries.size());
+        entries.push_back(std::move(pending));
+      }
     }
-
-    const fs::file_status status = iterator->symlink_status(error);
-    if (error) {
-      std::cerr << "llvm-pack: stat failed: " << error.message() << '\n';
-      return 1;
-    }
-
-    llvm_pack::EntryType type;
-    if (fs::is_symlink(status))
-      type = llvm_pack::EntryType::Symlink;
-    else if (fs::is_directory(status))
-      type = llvm_pack::EntryType::Directory;
-    else if (fs::is_regular_file(status))
-      type = llvm_pack::EntryType::File;
-    else
-      continue;
-
-    std::string relative =
-        iterator->path().lexically_relative(root).generic_string();
-    if (relative.empty() || relative.size() > UINT16_MAX) {
-      std::cerr << "llvm-pack: invalid path: " << relative << '\n';
-      return 1;
-    }
-
-    struct stat info {};
-    if (::lstat(iterator->path().c_str(), &info) != 0) {
-      std::cerr << "llvm-pack: lstat failed for " << relative << ": "
-                << std::strerror(errno) << '\n';
-      return 1;
-    }
-
-    entries.push_back({iterator->path(), std::move(relative), type,
-                       static_cast<std::uint32_t>(info.st_mode & 07777)});
   }
 
   std::ranges::sort(entries, {}, &PendingEntry::RelativePath);
@@ -128,9 +183,10 @@ int main(int argc, char **argv) {
   std::memcpy(header.MagicBytes, llvm_pack::Magic, sizeof(header.MagicBytes));
   header.VersionNumber = llvm_pack::Version;
   header.EntryCount = static_cast<std::uint32_t>(entries.size());
-  const std::uint64_t tableSize = sizeof(header) +
-      entries.size() * sizeof(llvm_pack::EntryHeader) +
-      std::ranges::fold_left(entries, std::uint64_t{0},
+  const std::uint64_t tableSize =
+      sizeof(header) + entries.size() * sizeof(llvm_pack::EntryHeader) +
+      std::ranges::fold_left(
+          entries, std::uint64_t{0},
           [](std::uint64_t total, const PendingEntry &entry) {
             return total + entry.RelativePath.size();
           });
@@ -160,6 +216,7 @@ int main(int argc, char **argv) {
 
   for (const PendingEntry &entry : entries) {
     input.clear();
+    compressed.clear();
 
     if (entry.Type == llvm_pack::EntryType::File) {
       std::ifstream file(entry.AbsolutePath, std::ios::binary | std::ios::ate);
@@ -170,11 +227,23 @@ int main(int argc, char **argv) {
       const auto size = file.tellg();
       if (size < 0)
         return 1;
-      input.resize(static_cast<std::size_t>(size));
+      auto &stored = entry.Precompressed ? compressed : input;
+      stored.resize(static_cast<std::size_t>(size));
       file.seekg(0);
-      file.read(input.data(), size);
+      file.read(stored.data(), size);
       if (!file)
         return 1;
+      if (entry.Precompressed) {
+        const auto originalSize = ZSTD_getFrameContentSize(compressed.data(), compressed.size());
+        if (originalSize == ZSTD_CONTENTSIZE_ERROR || originalSize == ZSTD_CONTENTSIZE_UNKNOWN ||
+            originalSize > SIZE_MAX)
+          return 1;
+        input.resize(static_cast<std::size_t>(originalSize));
+        const auto result = ZSTD_decompress(input.data(), input.size(),
+                                             compressed.data(), compressed.size());
+        if (ZSTD_isError(result) || result != input.size())
+          return 1;
+      }
     } else if (entry.Type == llvm_pack::EntryType::Symlink) {
       const std::string target = fs::read_symlink(entry.AbsolutePath, error).generic_string();
       if (error) {
@@ -187,7 +256,7 @@ int main(int argc, char **argv) {
 
     std::uint64_t dataKey = 0;
     const SharedData *reuse = nullptr;
-    if (entry.Type == llvm_pack::EntryType::File && !input.empty()) {
+    if (entry.Type == llvm_pack::EntryType::File && !input.empty() && !entry.Precompressed) {
       dataKey = hashValue(hashBytes(14695981039346656037ULL, input.data(),
                                     input.size()), input.size());
       if (const auto found = sharedData.find(dataKey);
@@ -202,8 +271,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    compressed.clear();
-    if (!input.empty() && !reuse) {
+    if (!input.empty() && !reuse && !entry.Precompressed) {
       compressed.resize(ZSTD_compressBound(input.size()));
       const std::size_t result = ZSTD_compress(
           compressed.data(), compressed.size(), input.data(), input.size(), 9);
@@ -238,7 +306,7 @@ int main(int argc, char **argv) {
     if (reuse) {
       ++reusedFiles;
       reusedBytes += reuse->StoredSize;
-    } else if (entry.Type == llvm_pack::EntryType::File && !input.empty()) {
+    } else if (entry.Type == llvm_pack::EntryType::File && !input.empty() && !entry.Precompressed) {
       sharedData[dataKey].push_back({entry.AbsolutePath,
                                      entryHeader.OriginalSize,
                                      entryHeader.StoredSize,

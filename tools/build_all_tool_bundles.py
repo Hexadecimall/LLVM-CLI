@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import shlex
 import subprocess
+import sys
 
 PROJECT = Path(__file__).resolve().parent.parent
 BUILD = PROJECT / "recovered/llvm-all/build"
@@ -49,7 +50,10 @@ def build(item: tuple[str, Path]) -> tuple[str, int, str]:
 
 
 def main() -> int:
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    if not BUILD.is_dir():
+        print("LLVM-CLI: native LLVM build directory is missing; "
+              "see docs/building.md", file=sys.stderr)
+        return 1
     links: dict[str, Path] = {}
     for link_file in BUILD.rglob("link.txt"):
         output = linked_output(link_file)
@@ -59,6 +63,11 @@ def main() -> int:
             continue
         links[output.name] = link_file
 
+    if not links:
+        print("LLVM-CLI: no native linked tool inputs found; "
+              "existing bundles and manifest were kept", file=sys.stderr)
+        return 1
+    OUTPUT.mkdir(parents=True, exist_ok=True)
     failures: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(build, item): item[0] for item in sorted(links.items())}

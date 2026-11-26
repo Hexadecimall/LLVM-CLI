@@ -1,5 +1,6 @@
 #include "include/example.hpp"
 #include <vector>
+#include <stdio.h>
 
 int main() {
   std::vector<int> values{embedded_header_answer()};

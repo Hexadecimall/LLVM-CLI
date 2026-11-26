@@ -4,6 +4,8 @@
 from pathlib import Path
 import os
 import subprocess
+import struct
+import sys
 import tempfile
 import unittest
 
@@ -14,6 +16,124 @@ BINARY = os.environ.get("LLVM_CLI_BINARY")
 
 @unittest.skipUnless(BINARY, "set LLVM_CLI_BINARY to the built host executable")
 class IncrementalBuildTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "embedded Darwin resources")
+    def test_darwin_c_headers_and_linker_without_xcode_discovery(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            source = root / "main.c"
+            source.write_text('#include <stdio.h>\nint main(void) { return puts("embedded") < 0; }\n')
+            environment = os.environ.copy()
+            environment.pop("SDKROOT", None)
+            environment.update(PATH="/nonexistent", DEVELOPER_DIR="/nonexistent")
+            configured = subprocess.run([BINARY, "env"], env=environment, text=True,
+                                        capture_output=True, timeout=180)
+            self.assertIn("SDKROOT=/__llvm/targets/macos", configured.stdout)
+            built = subprocess.run([BINARY, "cc", "-O3", "-Werror", "-Wall", "-Wextra",
+                                    str(source), "-o", str(root / "app")], env=environment,
+                                   text=True, capture_output=True, timeout=180)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(subprocess.check_output([str(root / "app")], text=True), "embedded\n")
+
+    def test_compiler_end_of_options(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            source = root / "main.c"
+            source.write_text("#include <stddef.h>\nint main(void) { return 0; }\n")
+            output = root / "app"
+            result = subprocess.run([BINARY, "clang", "-o", str(output), "--", str(source)],
+                                    text=True, capture_output=True, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(subprocess.run([str(output)], timeout=10).returncode, 0)
+
+    def test_renamed_binary_remains_a_dispatcher(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            renamed = Path(scratch) / "custom-compiler-suite"
+            renamed.symlink_to(Path(BINARY).resolve())
+            result = subprocess.run([str(renamed), "--version"], text=True,
+                                    capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("LLVM-CLI", result.stdout)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Mach-O static linking limitation")
+    def test_static_request_never_silently_links_system_runtime(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            source = Path(scratch) / "main.c"
+            source.write_text("int main(void) { return 0; }\n")
+            output = Path(scratch) / "app"
+            result = subprocess.run([BINARY, "clang", "-static", str(source), "-o", str(output)],
+                                    text=True, capture_output=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing to produce a dynamically linked executable", result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_windows_static_request_never_silently_imports_runtime(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            source = Path(scratch) / "main.c"
+            source.write_text("int main(void) { return 0; }\n")
+            output = Path(scratch) / "app.exe"
+            result = subprocess.run(
+                [BINARY, "clang", "-compile-target", "x86_64-windows-gnu", "-static",
+                 str(source), "-o", str(output)],
+                text=True, capture_output=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("import-free Windows executable", result.stderr)
+            self.assertFalse(output.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS static C++ runtime")
+    def test_native_static_cpp_filesystem(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            source = root / "filesystem.cpp"
+            source.write_text(
+                '#include <filesystem>\n#include <iostream>\n'
+                '#if __cplusplus != 201703L\n#error expected C++17 default\n#endif\n'
+                'int main() { std::cout << std::filesystem::current_path().string(); }\n')
+            output = root / "filesystem"
+            built = subprocess.run([BINARY, "clang++", str(source), "-o", str(output)],
+                                   text=True, capture_output=True, timeout=180)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            result = subprocess.run([str(output)], cwd=root, text=True,
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(Path(result.stdout).resolve(), root.resolve())
+            dependencies = subprocess.check_output(["otool", "-L", str(output)], text=True)
+            self.assertNotIn("libc++", dependencies)
+            self.assertNotIn("libunwind", dependencies)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS cross C++ runtime")
+    def test_x86_macos_cpp_uses_embedded_runtime(self):
+        validation = PROJECT / "validation"
+        validation.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=validation) as scratch:
+            root = Path(scratch)
+            source = root / "main.cpp"
+            source.write_text('#include <iostream>\nint main() { std::cout << "cross"; }\n')
+            output = root / "app"
+            environment = os.environ.copy()
+            environment.pop("SDKROOT", None)
+            environment.update(PATH="/nonexistent", DEVELOPER_DIR="/nonexistent")
+            built = subprocess.run([BINARY, "c++", "-compile-target", "x86_64-macos",
+                                    "-Werror", str(source), "-o", str(output)],
+                                   env=environment, text=True, capture_output=True, timeout=180)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            with output.open("rb") as image:
+                self.assertEqual(struct.unpack("<II", image.read(8)), (0xFEEDFACF, 0x01000007))
+            dependencies = subprocess.check_output(["otool", "-L", str(output)], text=True)
+            self.assertNotIn("libc++", dependencies)
+            self.assertIn("/usr/lib/libSystem.B.dylib", dependencies)
+
     def test_direct_clang_incremental_reuses_unchanged_objects(self):
         validation = PROJECT / "validation"
         validation.mkdir(exist_ok=True)

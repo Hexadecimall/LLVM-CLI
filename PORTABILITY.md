@@ -15,6 +15,14 @@ edition: the LLVM tool modules and their dependencies must still be rebuilt
 for each host. The Windows container loader and PE pack access remain to be
 implemented.
 
+Darwin libc headers, `libSystem` text stubs, Clang-compatible target metadata,
+and Apple Silicon/Intel macOS C++ archives are now staged as embedded target
+data. Ordinary macOS C/C++ cross-compilation can reuse these resources when
+native Linux and Windows containers become available; it need not discover an
+Xcode installation on those hosts. Apple framework SDKs are outside this
+libc resource set. This target-data work does not implement the missing host
+container or module loaders.
+
 A native edition needs the same source toolchain built for its host, with
 platform-specific pack-section access, in-memory module loading, path/file
 interposition, and dependency closure. The existing macOS object archives

@@ -1,6 +1,6 @@
 # LLVM-CLI
 
-Host status: the current single-file executable runs on macOS/Apple Silicon.
+Host status: the current single-file executable runs on macOS 27+/Apple Silicon.
 Its cross-compilation targets produce Linux, Windows, and WebAssembly output;
 they do **not** make this Mach-O executable itself run on those hosts. Native
 Linux and Windows editions require host-specific rebuilds of the container and
@@ -14,6 +14,10 @@ LLVM-prefixed tools accept the shorter command name too: `llvm nm`,
 `llvm ar`, and `llvm objdump` invoke their embedded `llvm-*` counterparts.
 For Neovim and other LSP editors, use the embedded `llvm clangd`; see
 [Editor integration](docs/editors.md).
+
+For development commands, build prerequisites, and the storage layout, see
+[Building and storage](docs/building.md). Run `make check` before rebuilding;
+it reports missing native inputs without changing files.
 
 ## Install from a release
 
@@ -53,6 +57,14 @@ The macOS installer writes one lowercase `llvm` executable; an uppercase
 LLVM-CLI release is available yet. Cross-compiled output is not a substitute
 for a host-native CLI.
 
+Starting with 1.8.0, `llvm update --check` checks GitHub for a newer native
+release; `llvm update` downloads, verifies, and atomically replaces the
+installed executable. Networking, TLS certificates, decompression, and hashing
+use embedded resources. It does not launch an installer, shell, or external
+download tool. A failed verification leaves the installed executable intact.
+The updater currently installs on macOS and Linux; Windows replacement still
+uses the PowerShell installer. No native Windows release is available yet.
+
 For release preparation, run `python3 tools/prepare_release.py --gzip
 --output-dir release-assets --binary darwin-arm64=PATH_TO_NATIVE_LLVM` and upload every
 file in `release-assets` to the same GitHub Release. `ghx api` creates and
@@ -64,6 +76,11 @@ paths before packaging. Gzip parts are capped at 256 MiB by default for
 reliable uploads; the installed executable remains an ordinary signed binary.
 Add Linux or Windows binaries only after those editions are built and verified
 on their native hosts.
+For a bounded-space publication, `tools/publish_release.py` accepts a pushed
+commit, tag, notes file, and native binaries. It keeps a draft release until
+every uploaded part and manifest has a matching server-side SHA-256. It stages
+and retires one part at a time instead of duplicating the full executable.
+Use `--gzip` for compressed 256 MiB transfer parts, or raw 1 GiB parts otherwise.
 
 ## Cross compilation
 
@@ -115,8 +132,13 @@ Clang also covers Objective-C, Objective-C++, and assembly via `-x`; `llc`
 accepts LLVM IR. Run `llvm compile-targets` for the installed support summary.
 
 The LLVM backends produce assembly and objects for their supported CPUs and
-object formats. macOS executable linking uses the embedded linker and the
-machine's Apple SDK. The x86-64 and AArch64 Linux musl targets include Zig's
+object formats. macOS C/C++ compilation uses embedded Darwin libc headers and
+`libSystem` text stubs reused from Zig, with the embedded Mach-O linker.
+Ordinary C/C++ programs need no installed Xcode SDK. These resources cover
+the C library, not Apple's framework SDKs; framework applications can select
+an explicit external SDK using `SDKROOT` or `-isysroot`. The same embedded
+Darwin resources can be used by future Linux and Windows host editions.
+The x86-64 and AArch64 Linux musl targets include Zig's
 libc headers, startup objects, libc, and compiler runtimes; normal C programs
 link as static executables. The x86-64 Linux musl target also embeds libc++
 headers, libc++abi, and libunwind for static C++ standard-library linking.
@@ -145,7 +167,8 @@ freestanding PE requires `-nostdlib` and an explicit entry point.
 
 On the native Apple Silicon host, `llvm c++` uses the embedded static libc++,
 libc++abi, and libunwind archives by default; a normal C++ executable imports
-only `libSystem`. For an explicit `-nodefaultlibs`/`-nostdlib` macOS link,
+only `libSystem`. Intel Mac C++ cross-compilation uses separately cross-built
+archives of those same LLVM 23.1.6 runtimes. For an explicit `-nodefaultlibs`/`-nostdlib` macOS link,
 LLVM-CLI still adds `libSystem`, which macOS requires to load the executable.
 Clang's default C++ language mode is C++17 (`__cplusplus=201703L`); select
 C++26 with `-std=c++26` (`__cplusplus=202400L` in Clang 23).
@@ -156,7 +179,9 @@ toolchain. C and freestanding C++ remain available.
 
 `-compile-target` selects the target for Clang, Flang, or `llc`. Flang 23 has
 target-specific lowering for fewer architectures than Clang, so some valid
-Clang targets cannot compile Fortran.
+Clang targets cannot compile Fortran. The embedded Fortran link runtime and
+intrinsic modules currently cover the native Apple Silicon/macOS target;
+cross-target Fortran executables need their corresponding runtime libraries.
 
 Common LLVM triples such as `x86_64-unknown-linux-musl` are accepted as
 aliases of `x86_64-linux-musl`. `linux-arm64` selects the embedded
@@ -203,9 +228,13 @@ LLVM-CLI's original source uses Apache-2.0 WITH LLVM-exception; see
 [LICENSE](LICENSE). Bundled upstream components retain their own licenses,
 collected under [licenses](licenses). The source tree deliberately excludes
 recovered toolchains, object files, generated images, and local test output.
+`llvm licenses` lists embedded notices; `llvm licenses llvm` reads LLVM's notice.
 The upstream changes needed for embedded-header lookup in `clangd` live in
 [`patches/llvm-embedded-vfs.patch`](patches/llvm-embedded-vfs.patch) and
 [`patches/clangd-embedded-resource-dir.patch`](patches/clangd-embedded-resource-dir.patch).
-Apply both to the LLVM 23.1.1 source tree before rebuilding those components.
+The pinned LLVM 23.1.6 macOS workflow preserves these embedding changes and
+applies the additional static-dependency patches automatically. See
+[the build guide](docs/building.md) for the capped workspace, reusable build
+stages, and candidate verification steps.
 Run `python3 tools/audit_public.py` before publishing source; pass a release
 binary path as an argument to check it for local home/project paths too.

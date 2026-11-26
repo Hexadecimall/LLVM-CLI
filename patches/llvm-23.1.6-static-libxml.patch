@@ -1,0 +1,20 @@
+--- a/llvm/cmake/modules/FindLibXml2.cmake
++++ b/llvm/cmake/modules/FindLibXml2.cmake
+@@ -88,7 +88,15 @@
+-  set(LIBXML2_STATIC_DEPS)
++  set(LIBXML2_STATIC_DEPS ${LIBXML2_EXTRA_STATIC_LIBRARIES})
+   foreach(lib IN LISTS PC_LIBXML_STATIC_LIBRARIES)
+     if(NOT lib STREQUAL "xml2")
+-      list(APPEND LIBXML2_STATIC_DEPS ${lib})
++      find_library(LIBXML2_STATIC_DEP_${lib}
++        NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}${lib}${CMAKE_STATIC_LIBRARY_SUFFIX}"
++        HINTS ${PC_LIBXML_STATIC_LIBRARY_DIRS}
++        NO_DEFAULT_PATH)
++      if(LIBXML2_STATIC_DEP_${lib})
++        list(APPEND LIBXML2_STATIC_DEPS ${LIBXML2_STATIC_DEP_${lib}})
++      else()
++        list(APPEND LIBXML2_STATIC_DEPS ${lib})
++      endif()
+     endif()
+   endforeach()
+ 

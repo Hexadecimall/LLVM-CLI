@@ -7,6 +7,11 @@
 
 #include <zstd.h>
 
+#ifndef LLVM_CLI_LLVM_VERSION
+#define LLVM_CLI_LLVM_VERSION "23.1.6"
+#endif
+#define LLVM_CLI_VERSION "1.8.0"
+
 #include <algorithm>
 #include <array>
 #include <cstdarg>
@@ -62,6 +67,8 @@ int (*CurrentEntrypoint)(int, char **) = nullptr;
 std::string CurrentBundleName;
 std::string MainExecutablePath;
 std::string ActiveCompileTarget;
+bool ActiveNativeCxxHeaders = false;
+bool ActiveSdkHeaders = false;
 
 std::string baseName(const char *path);
 
@@ -222,13 +229,22 @@ std::string entrySymbol(std::string tool) {
   for (char &character : tool)
     if (!std::isalnum(static_cast<unsigned char>(character)))
       character = '_';
+#if defined(__APPLE__)
   return "_LLVM_" + tool + "_main";
+#else
+  return "LLVM_" + tool + "_main";
+#endif
 }
 
 void configureAppleSdk() {
-#if defined(__APPLE__)
   if (const char *existing = std::getenv("SDKROOT"); existing && *existing)
     return;
+  if (findEntry("root/targets/macos/SDKSettings.json") &&
+      findEntry("root/targets/macos/usr/lib/libSystem.tbd")) {
+    ::setenv("SDKROOT", "/__llvm/targets/macos", 1);
+    return;
+  }
+#if defined(__APPLE__)
   std::vector<std::string> candidates;
   if (const char *developer = std::getenv("DEVELOPER_DIR");
       developer && *developer) {
@@ -540,17 +556,23 @@ bool flangSupportsTarget(const CompileTarget &target) {
 
 bool hasArgument(int argc, char **argv, int firstArgument,
                  std::string_view exact) {
-  for (int index = firstArgument; index < argc; ++index)
+  for (int index = firstArgument; index < argc; ++index) {
+    if (std::string_view(argv[index]) == "--")
+      break;
     if (std::string_view(argv[index]) == exact)
       return true;
+  }
   return false;
 }
 
 bool hasArgumentPrefix(int argc, char **argv, int firstArgument,
                        std::string_view prefix) {
-  for (int index = firstArgument; index < argc; ++index)
+  for (int index = firstArgument; index < argc; ++index) {
+    if (std::string_view(argv[index]) == "--")
+      break;
     if (std::string_view(argv[index]).starts_with(prefix))
       return true;
+  }
   return false;
 }
 
@@ -804,13 +826,56 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
   std::deque<std::string> targetCppOptions;
   for (int index = firstArgument; index < argc; ++index)
     arguments.push_back(argv[index]);
+  const std::size_t originalArgumentsEnd = arguments.size();
   const bool recursiveFrontend = firstArgument < argc &&
       (std::string_view(argv[firstArgument]).starts_with("-cc1") ||
        std::string_view(argv[firstArgument]) == "-fc1");
   const bool crossTarget = compileTarget && !compileTarget->Triple.empty();
-  const bool applePlatform = !crossTarget || compileTarget->Os == "macos" ||
-      compileTarget->Os == "ios" || compileTarget->Os == "tvos" ||
-      compileTarget->Os == "watchos" || compileTarget->Os == "visionos";
+  std::string_view rawTarget;
+  bool arm64Runtime = !crossTarget || compileTarget->Arch == "aarch64";
+  for (int index = firstArgument; index < argc; ++index) {
+    const std::string_view argument(argv[index]);
+    if (argument == "--")
+      break;
+    if ((argument == "-target" || argument == "--target") && index + 1 < argc)
+      rawTarget = argv[++index];
+    else if (argument.starts_with("--target="))
+      rawTarget = argument.substr(9);
+    else if (argument.starts_with("-target="))
+      rawTarget = argument.substr(8);
+    else if (argument == "-arch" && index + 1 < argc) {
+      const std::string_view arch(argv[++index]);
+      arm64Runtime &= arch == "arm64" || arch == "aarch64";
+    }
+  }
+  CompileTarget rawPlatform;
+  const bool knownRawTarget = !rawTarget.empty() && parseCompileTarget(rawTarget, rawPlatform);
+  const CompileTarget *platform = rawTarget.empty() ? compileTarget :
+      knownRawTarget ? &rawPlatform : nullptr;
+  const bool defaultPlatform = rawTarget.empty() && !crossTarget;
+  const bool applePlatform = defaultPlatform || (platform &&
+      (platform->Os == "macos" || platform->Os == "ios" || platform->Os == "tvos" ||
+       platform->Os == "watchos" || platform->Os == "visionos"));
+  const bool nativeMacRuntime = defaultPlatform || (platform && platform->Os == "macos");
+  const bool x86MacRuntime = platform && platform->Os == "macos" &&
+      platform->Arch == "x86_64";
+  const std::string nativeCxxRuntimeRoot = x86MacRuntime
+      ? "/__llvm/targets/x86_64-macos" : "/__llvm";
+  if (!rawTarget.empty())
+    arm64Runtime &= knownRawTarget && rawPlatform.Arch == "aarch64";
+  ActiveNativeCxxHeaders = (invokedName == "clang++" || invokedName == "clangd") && nativeMacRuntime &&
+      !recursiveFrontend &&
+      !hasArgument(argc, argv, firstArgument, "-nostdinc++") &&
+      !hasArgument(argc, argv, firstArgument, "-stdlib=libstdc++") &&
+      findEntry("root/include/c++/v1/__config_site");
+  ActiveSdkHeaders = false;
+  for (int index = firstArgument; index < argc; ++index) {
+    const std::string_view argument(argv[index]);
+    if ((argument.find("/__llvm/include") != std::string_view::npos ||
+         argument.find("/__llvm/deps/include") != std::string_view::npos) &&
+        argument.find("/__llvm/include/c++") == std::string_view::npos)
+      ActiveSdkHeaders = true;
+  }
   const bool bundledRuntime = !crossTarget || compileTarget->Os == "macos";
   const bool embeddedLibc = crossTarget && isClangDriver(invokedName) &&
       (compileTarget->Requested == "x86_64-linux-musl" ||
@@ -823,6 +888,15 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       invokedName != "clang-cpp" && invokedName != "clang-cl" &&
       !hasUserSysroot(argc, argv, firstArgument) &&
       !hasArgument(argc, argv, firstArgument, "-nostdlib");
+  if (applePlatform &&
+      (isClangDriver(invokedName) || isFlangDriver(invokedName) || invokedName == "ld64.lld") &&
+      (hasArgument(argc, argv, firstArgument, "-static") ||
+       hasArgument(argc, argv, firstArgument, "-static-pie")) &&
+      isDriverLink(argc, argv, firstArgument)) {
+    std::cerr << "LLVM: the embedded Mach-O linker does not implement fully static executables; "
+                 "refusing to produce a dynamically linked executable\n";
+    return 2;
+  }
   if (crossTarget && compileTarget->Os == "windows" &&
       hasArgument(argc, argv, firstArgument, "-static") &&
       isDriverLink(argc, argv, firstArgument)) {
@@ -893,19 +967,26 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
          hasArgument(argc, argv, firstArgument, "-nostdlib")) &&
         !hasArgument(argc, argv, firstArgument, "-lSystem"))
       arguments.push_back(const_cast<char *>("-lSystem"));
-    if (applePlatform && invokedName == "clang++" && driverLink &&
+    if (ActiveNativeCxxHeaders) {
+      arguments.push_back(const_cast<char *>("-nostdinc++"));
+      arguments.push_back(const_cast<char *>("-isystem"));
+      arguments.push_back(const_cast<char *>("/__llvm/include/c++/v1"));
+    }
+    if (nativeMacRuntime && invokedName == "clang++" && driverLink &&
+        !hasArgument(argc, argv, firstArgument, "-stdlib=libstdc++") &&
         !hasArgument(argc, argv, firstArgument, "-nostdlib") &&
         !hasArgument(argc, argv, firstArgument, "-nodefaultlibs") &&
         !hasArgument(argc, argv, firstArgument, "-nostdlib++") &&
         !hasArgument(argc, argv, firstArgument, "-dynamic") &&
-        (!compileTarget || compileTarget->Arch == "aarch64") &&
-        findEntry("root/lib/libc++.a") &&
-        findEntry("root/lib/libc++abi.a") &&
-        findEntry("root/lib/libunwind.a")) {
+        (arm64Runtime || x86MacRuntime) &&
+        findEntry(packedPathForVirtual(nativeCxxRuntimeRoot + "/lib/libc++.a")) &&
+        findEntry(packedPathForVirtual(nativeCxxRuntimeRoot + "/lib/libc++abi.a")) &&
+        findEntry(packedPathForVirtual(nativeCxxRuntimeRoot + "/lib/libunwind.a"))) {
       arguments.push_back(const_cast<char *>("-nostdlib++"));
       for (std::string_view library : {"libc++.a", "libc++abi.a",
                                        "libunwind.a"}) {
-        targetRuntimeFiles.emplace_back("/__llvm/lib/" + std::string(library));
+        targetRuntimeFiles.emplace_back("-Wl,-load_hidden," + nativeCxxRuntimeRoot +
+                                        "/lib/" + std::string(library));
         arguments.push_back(targetRuntimeFiles.back().data());
       }
     }
@@ -1052,12 +1133,12 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
         linkerOption = "-fuse-ld=lld";
         arguments.push_back(linkerOption.data());
       }
-      if (crossTarget && !applePlatform &&
+      if ((crossTarget || !rawTarget.empty()) && !applePlatform &&
           !hasArgumentPrefix(argc, argv, firstArgument, "-B")) {
         embeddedBinOption = "-B/__llvm/bin";
         arguments.push_back(embeddedBinOption.data());
       }
-      if (compileTarget == nullptr || compileTarget->Os != "wasi") {
+      if (rawTarget.empty() && (compileTarget == nullptr || compileTarget->Os != "wasi")) {
         if (!hasArgumentPrefix(argc, argv, firstArgument, "--ld-path=")) {
           linkerPathOption = std::string("--ld-path=/__llvm/bin/") +
               (applePlatform ? "ld64.lld" : "ld.lld");
@@ -1086,6 +1167,10 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       arguments.push_back(llvmLibraryOption.data());
     }
   }
+  const auto originalEnd = arguments.begin() + originalArgumentsEnd;
+  const auto separator = std::find_if(arguments.begin() + 1, originalEnd,
+      [](const char *argument) { return std::string_view(argument) == "--"; });
+  std::rotate(separator, originalEnd, arguments.end());
   arguments.push_back(nullptr);
   return entrypoint(static_cast<int>(arguments.size() - 1), arguments.data());
 }
@@ -1119,6 +1204,12 @@ int runScript(const std::string &name, int argc, char **argv,
         "sys.argv[0] = __file__\n"
         "exec(compile(source, __file__, 'exec'), globals(), globals())\n");
     storage.emplace_back(std::move(script));
+    if (name == "update") {
+      storage.emplace_back("--executable");
+      storage.emplace_back(MainExecutablePath);
+      storage.emplace_back("--current-version");
+      storage.emplace_back(LLVM_CLI_VERSION);
+    }
     for (int index = firstArgument; index < argc; ++index)
       storage.emplace_back(argv[index]);
     std::vector<char *> arguments;
@@ -1185,7 +1276,7 @@ std::string shortcutTarget(std::string_view requested) {
 }
 
 std::vector<std::string> toolNames() {
-  std::vector<std::string> names{"llvm", "ld", "build"};
+  std::vector<std::string> names{"llvm", "ld", "build", "licenses"};
   for (const Entry &entry : Entries) {
     constexpr std::string_view bundlePrefix = "bundles/";
     constexpr std::string_view aliasPrefix = "aliases/";
@@ -1216,19 +1307,58 @@ void listTools(std::string_view filter = {}) {
 }
 
 void printVersion() {
-  std::cout << "LLVM-CLI 1.7.0\n"
-               "LLVM 23.1.1\n"
+  std::cout << "LLVM-CLI " LLVM_CLI_VERSION "\n"
+               "LLVM " LLVM_CLI_LLVM_VERSION "\n"
                "Target: arm64-apple-darwin\n";
 }
 
 void printLinkerHelp() {
   std::cout <<
-      "LLVM-CLI embedded cross-linker (LLD 23.1.1)\n"
+      "LLVM-CLI embedded cross-linker (LLD " LLVM_CLI_LLVM_VERSION ")\n"
       "Usage: llvm lld [linker arguments and input objects]\n"
       "       llvm ld  [linker arguments and input objects]\n"
       "Input objects select ELF, Mach-O, COFF, or WebAssembly.\n"
       "For ambiguous inputs use -flavor gnu|darwin|link|wasm.\n"
       "Direct names: ld.lld, ld64.lld, lld-link, wasm-ld.\n";
+}
+
+int printLicenses(std::string component) {
+  if (component == "--help" || component == "-h") {
+    std::cout << "Usage: llvm licenses [component]\n";
+    return 0;
+  }
+  std::ranges::transform(component, component.begin(), [](unsigned char value) {
+    return static_cast<char>(std::tolower(value));
+  });
+  constexpr std::string_view prefix = "root/share/licenses/";
+  std::vector<std::string> names;
+  bool found = false;
+  for (const Entry &entry : Entries) {
+    if (entry.Header.Type != llvm_pack::EntryType::File || !entry.Path.starts_with(prefix))
+      continue;
+    const std::size_t separator = entry.Path.find('/', prefix.size());
+    if (separator == std::string::npos)
+      continue;
+    const std::string name = entry.Path.substr(prefix.size(), separator - prefix.size());
+    names.push_back(name);
+    if (name == component) {
+      std::cout << "== " << entry.Path.substr(prefix.size()) << " ==\n"
+                << embeddedText(entry.Path) << '\n';
+      found = true;
+    }
+  }
+  if (component.empty() && !names.empty()) {
+    std::ranges::sort(names);
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    for (const std::string &name : names)
+      std::cout << name << '\n';
+    std::cout << "Read notices with: llvm licenses <component>\n";
+    return 0;
+  }
+  if (!found)
+    std::cerr << "LLVM: bundled license notices not found"
+              << (component.empty() ? "" : " for ") << component << '\n';
+  return found ? 0 : 1;
 }
 
 void printHelp() {
@@ -1252,11 +1382,13 @@ void printHelp() {
       "Starting commands:\n"
       "  help                          Show this help\n"
       "  version                       Show LLVM-CLI and LLVM versions\n"
+      "  update [--check]              Install a verified GitHub release\n"
       "  list [filter]                 List or search embedded commands\n"
       "  info <tool>                   Describe how a command is provided\n"
       "  extras [tool]                 Show LLVM-CLI tools and added flags\n"
       "  env                           Show virtual toolchain paths\n"
       "  doctor                        Check the embedded toolchain payload\n"
+      "  licenses [component]          Read bundled license notices\n"
       "  build                         Compile only changed sources, then link\n"
       "  root                          Print the virtual root (/__llvm)\n\n"
       "Friendly shortcuts:\n"
@@ -1343,7 +1475,7 @@ void printCompileTargets(std::string_view filter = {}) {
       "riscv64-freestanding.\n"
       "Object/assembly output: supported wherever this LLVM build has a "
       "compatible backend.\n"
-      "Executable linking: macOS uses the embedded linker and host SDK. "
+      "Executable linking: macOS uses the embedded linker and Darwin libc resources. "
       "x86_64-linux-musl, aarch64-linux-musl, wasm32-wasi, and "
       "x86_64-windows-gnu use embedded headers and runtimes.\n"
       "Linux musl supports static executables by default and dynamic PIE "
@@ -1359,6 +1491,11 @@ void printCompileTargets(std::string_view filter = {}) {
 }
 
 bool printToolInfo(std::string requested) {
+  if (requested == "licenses") {
+    std::cout << "licenses\n  kind: embedded license notices\n"
+                 "  syntax: llvm licenses [component]\n";
+    return true;
+  }
   if (requested == "build") {
     std::cout << "build\n  kind: incremental in-binary build command\n"
                  "  syntax: llvm build --output APP [--target TARGET] SOURCE...\n"
@@ -1432,6 +1569,7 @@ bool printExtras(std::string requested = {}) {
         "  llvm info <tool>            Show a tool's embedded implementation\n"
         "  llvm compile-targets        Show cross-target runtime coverage\n"
         "  llvm doctor                 Check the packed payload\n\n"
+        "  llvm update [--check]       Install or check a verified GitHub release\n"
         "  llvm build                  Incremental C/C++ project build\n\n"
         "Added flag (compiler commands):\n"
         "  llvm <compiler> -compile-target <arch-os-abi> [arguments]\n"
@@ -1718,10 +1856,18 @@ LLVMEnumerateEmbeddedFiles(
         entry.Path.starts_with("root/lib/clang/23/include/");
     const bool fortranModule =
         entry.Path.starts_with("root/lib/clang/23/finclude/");
+    const bool nativeCxxHeader = ActiveNativeCxxHeaders &&
+        entry.Path.starts_with("root/include/c++/v1/");
+    const bool sdkHeader = ActiveSdkHeaders &&
+        (entry.Path.starts_with("root/include/") || entry.Path.starts_with("root/deps/include/"));
+    const bool darwinResource = entry.Path.starts_with("root/targets/macos/") &&
+        std::getenv("SDKROOT") &&
+        std::string_view(std::getenv("SDKROOT")) == "/__llvm/targets/macos";
     const bool targetResource = !ActiveCompileTarget.empty() &&
         entry.Path.starts_with("root/targets/" + ActiveCompileTarget +
                                "/include/");
-    if (!resourceHeader && !fortranModule && !targetResource)
+    if (!resourceHeader && !fortranModule && !targetResource && !nativeCxxHeader &&
+        !sdkHeader && !darwinResource)
       continue;
     const std::vector<char> bytes = decompress(entry);
     if (bytes.empty() && entry.Header.OriginalSize != 0)
@@ -1821,9 +1967,11 @@ int main(int argc, char **argv) {
     return 1;
   }
   const std::string invokedAs = baseName(argc ? argv[0] : nullptr);
+  const bool dispatcher = invokedAs == "LLVM" || invokedAs == "llvm" ||
+      (resolveTool(invokedAs).empty() && !hasScript(invokedAs));
   std::string targetCommand = invokedAs;
   std::string targetCommandName = invokedAs;
-  if (invokedAs == "LLVM" || invokedAs == "llvm") {
+  if (dispatcher) {
     const int commandIndex = argc > 1 &&
         (std::string_view(argv[1]) == "run" ||
          std::string_view(argv[1]) == "tool") ? 2 : 1;
@@ -1847,6 +1995,10 @@ int main(int argc, char **argv) {
   filteredArguments.push_back(argv[0]);
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
+    if (argument == "--") {
+      filteredArguments.insert(filteredArguments.end(), argv + index, argv + argc);
+      break;
+    }
     if (argument == "-compile-target" ||
         argument.starts_with("-compile-target=")) {
       if (!targetCommand.empty() && !isCompilerCommand(targetCommand)) {
@@ -1897,9 +2049,6 @@ int main(int argc, char **argv) {
       }
     }
   }
-  const bool dispatcher = invokedAs == "LLVM" || invokedAs == "llvm" ||
-      (resolveTool(invokedAs).empty() && !hasScript(invokedAs) && argc >= 2 &&
-       (!resolveTool(argv[1]).empty() || hasScript(argv[1])));
   const BuildInvoke invokeBuildCompiler = [&](std::string_view compiler,
       std::string_view target, const std::vector<std::string> &options) {
     CompileTarget parsed;
@@ -1962,6 +2111,13 @@ int main(int argc, char **argv) {
     if (command == "--version" || command == "-V" || command == "version") {
       printVersion();
       return 0;
+    }
+    if (command == "licenses") {
+      if (argc > 3) {
+        std::cerr << "Usage: llvm licenses [component]\n";
+        return 2;
+      }
+      return printLicenses(argc == 3 ? argv[2] : "");
     }
     if (command == "compile-targets") {
       printCompileTargets(argc >= 3 ? std::string_view(argv[2]) :
@@ -2041,7 +2197,7 @@ int main(int argc, char **argv) {
     }
     if (hasArgument(argc, argv, firstArgument, "--version") &&
         argc == firstArgument + 1) {
-      std::cout << "LLD 23.1.1 (embedded; ELF, Mach-O, COFF, WebAssembly)\n";
+      std::cout << "LLD " LLVM_CLI_LLVM_VERSION " (embedded; ELF, Mach-O, COFF, WebAssembly)\n";
       return 0;
     }
     if (hasArgument(argc, argv, firstArgument, "-flavor") ||
@@ -2092,7 +2248,7 @@ int main(int argc, char **argv) {
                 << "' currently requires the Clang cc/c++/cpp driver\n";
       return 2;
     }
-    if ((isClangDriver(requested) || isFlangDriver(requested)) &&
+    if ((isClangDriver(requested) || isFlangDriver(requested) || requested == "clangd") &&
         (!selectedTarget || compileTarget.Os == "macos"))
       configureAppleSdk();
     if (selectedTarget &&

@@ -18,6 +18,7 @@ GZIP_CHUNK_SIZE = 256 * 1024 * 1024
 COPY_SIZE = 8 * 1024 * 1024
 PLATFORMS = {
     "darwin-arm64",
+    "darwin-x86_64",
     "linux-x86_64",
     "linux-aarch64",
     "windows-x86_64",
@@ -39,11 +40,12 @@ def validate_host_format(platform: str, source: Path) -> None:
         raise ValueError(f"missing host binary: {source}")
     with source.open("rb") as image:
         header = image.read(64)
-        if platform == "darwin-arm64":
+        if platform.startswith("darwin-"):
+            machine = 0x0100000C if platform == "darwin-arm64" else 0x01000007
             valid = (
                 header[:4] == b"\xcf\xfa\xed\xfe"
                 and len(header) >= 8
-                and struct.unpack_from("<I", header, 4)[0] == 0x0100000C
+                and struct.unpack_from("<I", header, 4)[0] == machine
             )
         elif platform.startswith("linux-"):
             machine = 62 if platform == "linux-x86_64" else 183
@@ -68,7 +70,7 @@ def validate_host_format(platform: str, source: Path) -> None:
 
 
 def split_binary(platform: str, source: Path, destination: Path,
-                 chunk_size: int = CHUNK_SIZE) -> list[str]:
+                 chunk_size: int = CHUNK_SIZE, on_part=None) -> list[str]:
     if not source.is_file() or source.stat().st_size == 0:
         raise ValueError(f"missing or empty host binary: {source}")
     if chunk_size < 1 or chunk_size >= 2 * 1024 * 1024 * 1024:
@@ -102,6 +104,8 @@ def split_binary(platform: str, source: Path, destination: Path,
             lines.append(
                 f"part {platform} {index} {part_size} {part_hash.hexdigest()}"
             )
+            if on_part is not None:
+                on_part(part_path)
         if input_file.read(1):
             raise OSError(f"source grew during packaging: {source}")
 
@@ -112,7 +116,7 @@ def split_binary(platform: str, source: Path, destination: Path,
 
 
 def split_gzip_binary(platform: str, source: Path, destination: Path,
-                      chunk_size: int = GZIP_CHUNK_SIZE) -> list[str]:
+                      chunk_size: int = GZIP_CHUNK_SIZE, on_part=None) -> list[str]:
     """Compress once, split the byte stream, and retain the final binary hash."""
     if not source.is_file() or source.stat().st_size == 0:
         raise ValueError(f"missing or empty host binary: {source}")
@@ -130,6 +134,7 @@ def split_gzip_binary(platform: str, source: Path, destination: Path,
         nonlocal output_file, part_hash, part_size
         if output_file is None:
             return
+        part_path = Path(output_file.name)
         output_file.close()
         lines.append(
             f"part {platform} {len(lines)} {part_size} {part_hash.hexdigest()}"
@@ -137,6 +142,8 @@ def split_gzip_binary(platform: str, source: Path, destination: Path,
         output_file = None
         part_hash = hashlib.sha256()
         part_size = 0
+        if on_part is not None:
+            on_part(part_path)
 
     def write_compressed(data: bytes) -> None:
         nonlocal output_file, part_size

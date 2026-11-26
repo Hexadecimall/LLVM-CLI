@@ -37,8 +37,10 @@ CompileFlags:
 
 Use the project's real flags. `-Iinclude` is only an example; it does not
 discover arbitrary headers. Quoted local includes are resolved relative to
-their source file. macOS system headers still come from the active SDK,
-while Clang's resource headers are embedded in LLVM-CLI. Cross-target header
+their source file. Darwin libc headers, native C++ headers, and Clang's resource
+headers are embedded in LLVM-CLI. The embedded clangd selects the virtual
+compiler directly instead of launching `xcrun` to discover an external compiler.
+Apple framework headers require an explicitly selected framework SDK. Cross-target header
 navigation needs a compile database or `.clangd` with that target's actual
 triple and include paths.
 

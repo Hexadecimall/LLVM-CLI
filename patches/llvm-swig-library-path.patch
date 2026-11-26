@@ -1,0 +1,22 @@
+--- a/lldb/bindings/lua/CMakeLists.txt
++++ b/lldb/bindings/lua/CMakeLists.txt
+@@ -4,7 +4,7 @@
+   DEPENDS ${SWIG_INTERFACES}
+   DEPENDS ${SWIG_HEADERS}
+   DEPENDS lldb-sbapi-dwarf-enums
+-  COMMAND ${SWIG_EXECUTABLE}
++  COMMAND ${CMAKE_COMMAND} -E env "SWIG_LIB=${SWIG_DIR}" ${SWIG_EXECUTABLE}
+       ${SWIG_COMMON_FLAGS}
+       -I${CMAKE_CURRENT_SOURCE_DIR}
+       -lua
+--- a/lldb/bindings/python/CMakeLists.txt
++++ b/lldb/bindings/python/CMakeLists.txt
+@@ -12,7 +12,7 @@
+   DEPENDS ${SWIG_INTERFACES}
+   DEPENDS ${SWIG_HEADERS}
+   DEPENDS lldb-sbapi-dwarf-enums
+-  COMMAND ${SWIG_EXECUTABLE}
++  COMMAND ${CMAKE_COMMAND} -E env "SWIG_LIB=${SWIG_DIR}" ${SWIG_EXECUTABLE}
+       ${SWIG_COMMON_FLAGS}
+       -doxygen
+       -I${CMAKE_CURRENT_SOURCE_DIR}

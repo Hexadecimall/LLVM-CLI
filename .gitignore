@@ -4,6 +4,7 @@
 /dependency-objects/
 /validation/
 /host-build/
+/build-work/
 /release-assets/
 /.llvm-cli-build/
 
