@@ -156,7 +156,7 @@ def prepare(workspace, resume_reviewed=False):
                        cwd=candidate, check=True)
     for name in ("llvm-23.1.6-static-libxml.patch", "llvm-config-embedded-prefix.patch",
                  "llvm-static-libedit.patch", "llvm-swig-library-path.patch",
-                 "llvm-static-python.patch"):
+                 "llvm-static-python.patch", "clang-embedded-dependencies.patch"):
         subprocess.run(["patch", "--batch", "--forward", "-p1", "-i",
                         str(PROJECT / "patches" / name)], cwd=candidate, check=True)
     ready.write_text(json.dumps({"version": version, "sha256": RELEASE["source_sha256"],

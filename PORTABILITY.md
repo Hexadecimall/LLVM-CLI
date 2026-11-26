@@ -54,3 +54,26 @@ Current verification:
   headers and archives; external headers alone were insufficient without
   target-specific libc++ configuration.
 - No native Linux or Windows LLVM-CLI executable has been built or run yet.
+
+The current host bootstrap shares the LLVM 23.1.6 source with the macOS build.
+Idle generated macOS inputs can be frozen with verified Zstandard frames to
+reserve space for another host without deleting its incremental build inputs.
+`tools/prepare_linux_runtime.py` reuses installed Zig glibc headers, import
+stubs, and minimal C startup code, then builds LLVM's C++ runtime using
+LLVM-CLI. `tools/linux_build.py` cross-builds loader libraries with that
+runtime and the existing native table generators. Its initial library-only
+profile disables optional compression/XML dependencies; it is a bootstrap
+experiment, not a release profile or complete tool inventory.
+
+`tools/prepare_windows_runtime.py` builds Windows libc++, libc++abi, and
+libunwind against the retained C headers and import archives. The Linux and
+Windows C++ probes link with static C++ runtimes and system C runtime imports;
+`tools/check_host_runtime.py` verifies those dependency lists. This does not
+yet add automatic GNU/Linux or Windows hosted C++ resources to the installed
+macOS edition.
+
+`tools/probe_object_loader.py` verifies an alternative module representation:
+precompiled objects and LLVM's existing ORC platform runtime embedded together
+in one executable. The macOS probe runs constructors, per-thread TLS, an entry
+point, and destructors without external tools at execution time. Linux and
+Windows implementations still require native validation before publication.

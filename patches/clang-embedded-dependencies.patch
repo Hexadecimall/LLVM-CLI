@@ -1,0 +1,50 @@
+--- a/clang/lib/Frontend/DependencyFile.cpp
++++ b/clang/lib/Frontend/DependencyFile.cpp
+@@ -21,6 +21,7 @@
+ #include "clang/Lex/Preprocessor.h"
+ #include "clang/Serialization/ASTReader.h"
+ #include "llvm/ADT/StringSet.h"
++#include "llvm/Support/DynamicLibrary.h"
+ #include "llvm/Support/FileSystem.h"
+ #include "llvm/Support/Path.h"
+ #include "llvm/Support/raw_ostream.h"
+@@ -417,6 +418,30 @@
+   // Now add each dependency in the order it was seen, but avoiding
+   // duplicates.
+   ArrayRef<std::string> Files = getDependencies();
++  std::vector<std::string> EmbeddedDependencies;
++  unsigned PhonyInputIndex = InputFileIndex;
++  // Embedded headers change with the container. External build systems cannot
++  // stat their virtual names, so track the physical executable in depfiles.
++  // Keep -MG's missing-file names and the collector's module graph unchanged.
++  using ExecutablePath = const char *(*)();
++  auto Process = llvm::sys::DynamicLibrary::getPermanentLibrary(nullptr);
++  auto GetExecutablePath = reinterpret_cast<ExecutablePath>(
++      Process.isValid() ? Process.getAddressOfSymbol("LLVMExecutablePath") : nullptr);
++  const char *Executable = GetExecutablePath ? GetExecutablePath() : nullptr;
++  if (!AddMissingHeaderDeps && Executable && *Executable) {
++    llvm::StringMap<unsigned> Emitted;
++    for (unsigned I = 0; I != Files.size(); ++I) {
++      StringRef File = Files[I];
++      if (File.starts_with("/__llvm/"))
++        File = Executable;
++      auto Inserted = Emitted.try_emplace(File, EmbeddedDependencies.size());
++      if (I == InputFileIndex)
++        PhonyInputIndex = Inserted.first->second;
++      if (Inserted.second)
++        EmbeddedDependencies.emplace_back(File);
++    }
++    Files = EmbeddedDependencies;
++  }
+   for (StringRef File : Files) {
+     if (File == "<stdin>")
+       continue;
+@@ -438,7 +463,7 @@
+   if (PhonyTarget && !Files.empty()) {
+     unsigned Index = 0;
+     for (auto I = Files.begin(), E = Files.end(); I != E; ++I) {
+-      if (Index++ == InputFileIndex)
++      if (Index++ == PhonyInputIndex)
+         continue;
+       PrintFilename(OS, *I, OutputFormat);
+       OS << ":\n";

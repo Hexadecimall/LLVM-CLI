@@ -194,3 +194,35 @@ frame only after its raw input has been restored. It refuses to overwrite a
 changed raw input. `status` reports the frozen set without restoring it.
 If another host occupies the available space, freeze that idle host first.
 Read-only input checks do not thaw files.
+
+## Linux host bootstrap
+
+After preparing the shared source and freezing the idle macOS build, run:
+
+```sh
+python3 -B tools/prepare_linux_runtime.py --zig /path/to/zig --zig-lib /path/to/zig/lib --jobs 4
+python3 -B tools/linux_build.py --build --jobs 4
+```
+
+The installed LLVM-CLI compiles project sources and the matching C++ runtime.
+Zig is used only to generate glibc import stubs and minimal C startup resources.
+Build headers reuse the installed resource tree through links; packaging must
+materialize those resources inside the executable. The loader-library profile
+is incremental and does not produce a complete Linux release. It shares the
+capped durable workspace with macOS rather than allocating a second full tree.
+Use `tools/probe_object_loader.py` to reproduce the macOS embedded-object
+lifecycle check against the retained native SDK archives.
+
+`tools/prepare_windows_runtime.py --jobs 4` builds the matching Windows C++
+runtime from the same source and retained Windows C resources.
+`tools/check_host_runtime.py linux` and `windows` link the hosted runtime
+checks and inspect their system dependencies. The native-probes workflow
+executes these locally built files; it performs no compilation.
+
+During bootstrap, `linux_build.py` repairs virtual resource names in generated
+Make dependency records to track the physical LLVM-CLI executable. Otherwise
+Make sees nonexistent `/__llvm` paths and rebuilds unchanged sources. The
+upstream Clang depfile patch applies this mapping when writing depfiles while
+preserving the module dependency graph, standalone behavior, and `-MG` names.
+`tools/probe_dependency_file.py` checks the patched writer directly. That
+patch needs a rebuilt container before installed compiler invocations gain it.

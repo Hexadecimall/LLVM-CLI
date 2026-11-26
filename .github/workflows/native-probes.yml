@@ -1,0 +1,86 @@
+name: Run locally cross-built probes
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_asset:
+        description: Release asset ID of the local prebuild validation manifest
+        required: true
+        type: string
+      manifest_sha256:
+        description: SHA-256 of the validation manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: windows-2022
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      # Only execute checksummed prebuilds. No source checkout or compilation.
+      - name: Verify and execute local prebuilds
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_ASSET: ${{ inputs.manifest_asset }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          PROBE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          from urllib.request import Request, urlopen
+
+          def download(asset, destination, expected, limit):
+              asset = int(asset)
+              url = f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/releases/assets/{asset}'
+              request = Request(url, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/octet-stream',
+                  'User-Agent': 'LLVM-CLI-native-validation',
+              })
+              digest = hashlib.sha256()
+              size = 0
+              with urlopen(request, timeout=60) as response, destination.open('xb') as output:
+                  while chunk := response.read(1024 * 1024):
+                      size += len(chunk)
+                      if size > limit:
+                          raise RuntimeError('asset exceeds validation size limit')
+                      digest.update(chunk)
+                      output.write(chunk)
+              if digest.hexdigest() != expected:
+                  raise RuntimeError('prebuild checksum mismatch')
+
+          manifest = Path('native-probes.json')
+          download(os.environ['MANIFEST_ASSET'], manifest, os.environ['MANIFEST_SHA256'], 65536)
+          records = json.loads(manifest.read_text())
+          platform = os.environ['PROBE_PLATFORM']
+          for name in ([platform + '-cxx', 'linux-objects'] if platform == 'linux' else ['windows-cxx']):
+              record = records[name]
+              executable = Path(name + ('.exe' if platform == 'windows' else '')).absolute()
+              download(record['asset'], executable, record['sha256'], 512 * 1024**2)
+              executable.chmod(0o755)
+              environment = dict(os.environ, PATH='')
+              environment.pop('GH_TOKEN', None)
+              result = subprocess.run([str(executable)], env=environment,
+                                      capture_output=True, text=True, timeout=60)
+              print(name + ': exit ' + str(result.returncode))
+              print(result.stdout)
+              print(result.stderr)
+              markers = (['embedded constructor ran', 'embedded destructor ran', 'object entry returned 42']
+                         if name.endswith('objects') else ['constructor', 'host runtime passed', 'destructor'])
+              if result.returncode or any(marker not in result.stdout for marker in markers):
+                  raise RuntimeError('native execution failed: ' + name)
