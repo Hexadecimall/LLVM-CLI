@@ -12,8 +12,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   validate:
@@ -32,7 +31,6 @@ jobs:
       - name: Verify and execute local prebuilds
         shell: python
         env:
-          GH_TOKEN: ${{ github.token }}
           MANIFEST_ASSET: ${{ inputs.manifest_asset }}
           MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
           PROBE_PLATFORM: ${{ matrix.platform }}
@@ -48,7 +46,6 @@ jobs:
               asset = int(asset)
               url = f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/releases/assets/{asset}'
               request = Request(url, headers={
-                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
                   'Accept': 'application/octet-stream',
                   'User-Agent': 'LLVM-CLI-native-validation',
               })
@@ -74,7 +71,6 @@ jobs:
               download(record['asset'], executable, record['sha256'], 512 * 1024**2)
               executable.chmod(0o755)
               environment = dict(os.environ, PATH='')
-              environment.pop('GH_TOKEN', None)
               result = subprocess.run([str(executable)], env=environment,
                                       capture_output=True, text=True, timeout=60)
               print(name + ': exit ' + str(result.returncode))
