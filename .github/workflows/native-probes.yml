@@ -65,12 +65,40 @@ jobs:
           download(os.environ['MANIFEST_ASSET'], manifest, os.environ['MANIFEST_SHA256'], 65536)
           records = json.loads(manifest.read_text())
           platform = os.environ['PROBE_PLATFORM']
-          for name in ([platform + '-cxx', 'linux-objects'] if platform == 'linux' else ['windows-cxx']):
+          names = [platform + '-cxx']
+          if platform == 'linux':
+              names.append('linux-objects')
+          if platform + '-llvm' in records:
+              names.append(platform + '-llvm')
+          for name in names:
               record = records[name]
               executable = Path(name + ('.exe' if platform == 'windows' else '')).absolute()
               download(record['asset'], executable, record['sha256'], 512 * 1024**2)
               executable.chmod(0o755)
               environment = dict(os.environ, PATH='')
+              if name.endswith('-llvm'):
+                  def invoke(arguments):
+                      result = subprocess.run([str(executable), *arguments], env=environment,
+                                              capture_output=True, text=True, timeout=60)
+                      print(result.stdout, result.stderr, flush=True)
+                      result.check_returncode()
+                      return result.stdout
+
+                  assert '23.1.6' in invoke(['cc', '--version'])
+                  assert '23.1.6' in invoke(['nm', '--version'])
+                  source = Path('hello.c')
+                  source.write_text('#include <stdio.h>\nint main(void) { puts("embedded hello"); }\n')
+                  output = Path('hello.exe' if platform == 'windows' else 'hello').absolute()
+                  target = 'x86_64-windows-gnu' if platform == 'windows' else 'x86_64-linux-gnu'
+                  invoke(['cc', '-compile-target', target, str(source), '-o', str(output)])
+                  result = subprocess.run([str(output)], env=environment, text=True,
+                                          capture_output=True, timeout=30, check=True)
+                  assert result.stdout.strip() == 'embedded hello'
+                  invoke(['cc', '-compile-target', 'aarch64-macos', str(source), '-o', 'hello-macos'])
+                  assert Path('hello-macos').read_bytes()[:4] == bytes.fromhex('cffaedfe')
+                  invoke(['cc', '-compile-target', 'wasm32-wasi', str(source), '-o', 'hello.wasm'])
+                  assert Path('hello.wasm').read_bytes()[:4] == b'\0asm'
+                  continue
               result = subprocess.run([str(executable)], env=environment,
                                       capture_output=True, text=True, timeout=60)
               print(name + ': exit ' + str(result.returncode))

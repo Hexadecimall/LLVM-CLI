@@ -18,7 +18,11 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -80,7 +84,11 @@ bool loadExpanded(std::string path, std::vector<char> &output,
 int writeExpanded(const std::string &name, int argc, char **argv,
                   int firstArgument) {
   if (firstArgument == argc) {
+#ifdef _WIN32
+    if (::_isatty(0)) {
+#else
     if (::isatty(STDIN_FILENO)) {
+#endif
       std::cerr << "usage: " << name << " files...\n";
       return 1;
     }

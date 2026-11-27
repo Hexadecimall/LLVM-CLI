@@ -6,11 +6,13 @@ import subprocess
 
 
 def rename_entry(source: Path, target: Path, name: str,
-                 bootstrap: Path, objcopy: Path, compiler=None) -> None:
+                 bootstrap: Path, objcopy: Path, compiler=None, *,
+                 symbol_prefix="_", objcopy_args=()) -> None:
     with source.open("rb") as stream:
         magic = stream.read(4)
     if magic not in (b"BC\xc0\xde", b"\xde\xc0\x17\x0b"):
-        subprocess.run([str(objcopy), "--redefine-sym", f"_main=_{name}",
+        subprocess.run([str(objcopy), *objcopy_args, "--redefine-sym",
+                        f"{symbol_prefix}main={symbol_prefix}{name}",
                         str(source), str(target)], check=True)
         return
     ir = target.with_suffix(target.suffix + ".ll")

@@ -1,0 +1,166 @@
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -107,7 +107,20 @@
+ #include "llvm/Support/StringSaver.h"
+ #include "llvm/Support/TarWriter.h"
+ #include "llvm/Support/VirtualFileSystem.h"
++#ifdef _WIN32
++#include "llvm/Support/DynamicLibrary.h"
++#else
+ #include <dlfcn.h>
++#endif
++
++static void *findEmbeddedSymbol(const char *Name) {
++#ifdef _WIN32
++  auto Process = llvm::sys::DynamicLibrary::getPermanentLibrary(nullptr);
++  return Process.isValid() ? Process.getAddressOfSymbol(Name) : nullptr;
++#else
++  return dlsym(RTLD_DEFAULT, Name);
++#endif
++}
+ #include "llvm/Support/raw_ostream.h"
+ #include "llvm/TargetParser/Host.h"
+ #include "llvm/TargetParser/RISCVISAInfo.h"
+@@ -6890,7 +6903,7 @@
+       llvm::sys::path::append(P, Name);
+       using HasEmbeddedTool = bool (*)(const char *);
+       auto HasTool = reinterpret_cast<HasEmbeddedTool>(
+-          dlsym(RTLD_DEFAULT, "LLVMHasEmbeddedTool"));
++          findEmbeddedSymbol("LLVMHasEmbeddedTool"));
+       if (HasTool && HasTool(P.c_str()))
+         return std::string(P);
+       continue;
+--- a/llvm/lib/Support/Program.cpp
++++ b/llvm/lib/Support/Program.cpp
+@@ -14,7 +14,20 @@
+ #include "llvm/ADT/StringRef.h"
+ #include "llvm/Config/llvm-config.h"
+ #include "llvm/Support/raw_ostream.h"
++#ifdef _WIN32
++#include "llvm/Support/DynamicLibrary.h"
++#else
+ #include <dlfcn.h>
++#endif
++
++static void *findEmbeddedSymbol(const char *Name) {
++#ifdef _WIN32
++  auto Process = llvm::sys::DynamicLibrary::getPermanentLibrary(nullptr);
++  return Process.isValid() ? Process.getAddressOfSymbol(Name) : nullptr;
++#else
++  return dlsym(RTLD_DEFAULT, Name);
++#endif
++}
+ using namespace llvm;
+ using namespace sys;
+ 
+@@ -40,7 +53,7 @@
+   assert(Redirects.empty() || Redirects.size() == 3);
+   using EmbeddedRunner = int (*)(const char *, const char *const *, std::size_t);
+   auto RunEmbedded = reinterpret_cast<EmbeddedRunner>(
+-      dlsym(RTLD_DEFAULT, "LLVMRunEmbeddedTool"));
++      findEmbeddedSymbol("LLVMRunEmbeddedTool"));
+   if (RunEmbedded && Program.starts_with("/__llvm/bin/") && !Env &&
+       Redirects.empty() && SecondsToWait == 0 && MemoryLimit == 0 &&
+       !AffinityMask) {
+--- a/llvm/lib/Support/VirtualFileSystem.cpp
++++ b/llvm/lib/Support/VirtualFileSystem.cpp
+@@ -41,7 +41,20 @@
+ #include <atomic>
+ #include <cassert>
+ #include <cstdint>
++#ifdef _WIN32
++#include "llvm/Support/DynamicLibrary.h"
++#else
+ #include <dlfcn.h>
++#endif
++
++static void *findEmbeddedSymbol(const char *Name) {
++#ifdef _WIN32
++  auto Process = llvm::sys::DynamicLibrary::getPermanentLibrary(nullptr);
++  return Process.isValid() ? Process.getAddressOfSymbol(Name) : nullptr;
++#else
++  return dlsym(RTLD_DEFAULT, Name);
++#endif
++}
+ #include <iterator>
+ #include <limits>
+ #include <map>
+@@ -428,7 +441,7 @@
+ static IntrusiveRefCntPtr<InMemoryFileSystem> createEmbeddedFileSystem() {
+   static IntrusiveRefCntPtr<InMemoryFileSystem> Memory = [] {
+     auto Enumerate = reinterpret_cast<LLVMEnumerateEmbeddedFilesFn>(
+-        dlsym(RTLD_DEFAULT, "LLVMEnumerateEmbeddedFiles"));
++        findEmbeddedSymbol("LLVMEnumerateEmbeddedFiles"));
+     if (!Enumerate)
+       return IntrusiveRefCntPtr<InMemoryFileSystem>();
+     auto FS = makeIntrusiveRefCnt<InMemoryFileSystem>();
+--- a/llvm/lib/Support/InitLLVM.cpp
++++ b/llvm/lib/Support/InitLLVM.cpp
+@@ -16,6 +16,7 @@
+ 
+ #ifdef _WIN32
+ #include "llvm/Support/Windows/WindowsSupport.h"
++#include "llvm/Support/DynamicLibrary.h"
+ #endif
+ 
+ #if defined(HAVE_UNISTD_H)
+@@ -127,6 +128,11 @@
+   // There's probably other way to do the same thing (e.g. using
+   // wmain() instead of main()), but this way seems less intrusive
+   // than that.
++  if (StringRef(Argv[0]).starts_with("/__llvm/bin/")) {
++    auto Process = DynamicLibrary::getPermanentLibrary(nullptr);
++    if (Process.isValid() && Process.getAddressOfSymbol("LLVMExecutablePath"))
++      return;
++  }
+   std::string Banner = std::string(Argv[0]) + ": ";
+   ExitOnError ExitOnErr(Banner);
+ 
+--- a/llvm/lib/Support/MemoryBuffer.cpp
++++ b/llvm/lib/Support/MemoryBuffer.cpp
+@@ -17,6 +17,9 @@
+ #include "llvm/Support/Alignment.h"
+ #include "llvm/Support/AutoConvert.h"
+ #include "llvm/Support/Errc.h"
++#ifdef _WIN32
++#include "llvm/Support/DynamicLibrary.h"
++#endif
+ #include "llvm/Support/Error.h"
+ #include "llvm/Support/ErrorHandling.h"
+ #include "llvm/Support/FileSystem.h"
+@@ -267,6 +270,24 @@
+                       std::optional<Align> Alignment) {
+   sys::sandbox::violationIfEnabled();
+ 
++#ifdef _WIN32
++  SmallString<256> PathStorage;
++  StringRef Path = Filename.toNullTerminatedStringRef(PathStorage);
++  if (Path.starts_with("/__llvm/") || Path.starts_with("\\__llvm\\")) {
++    using Reader = bool (*)(const char *, void (*)(const void *, size_t, void *), void *);
++    auto Process = sys::DynamicLibrary::getPermanentLibrary(nullptr);
++    auto Read = reinterpret_cast<Reader>(
++        Process.isValid() ? Process.getAddressOfSymbol("LLVMReadEmbeddedFile") : nullptr);
++    std::unique_ptr<MemoryBuffer> Result;
++    auto Copy = [](const void *Data, size_t Size, void *Context) {
++      *static_cast<std::unique_ptr<MemoryBuffer> *>(Context) =
++          MemoryBuffer::getMemBufferCopy(StringRef(static_cast<const char *>(Data), Size));
++    };
++    if (Read && Read(Path.data(), Copy, &Result))
++      return Result;
++  }
++#endif
++
+   return getFileAux<MemoryBuffer>(Filename, /*MapSize=*/-1, /*Offset=*/0,
+                                   IsText, RequiresNullTerminator, IsVolatile,
+                                   Alignment);
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -6900,7 +6900,7 @@
+   for (const auto &PrefixDir : PrefixDirs) {
+     if (StringRef(PrefixDir).starts_with("/__llvm/bin")) {
+       SmallString<128> P(PrefixDir);
+-      llvm::sys::path::append(P, Name);
++      llvm::sys::path::append(P, llvm::sys::path::Style::posix, Name);
+       using HasEmbeddedTool = bool (*)(const char *);
+       auto HasTool = reinterpret_cast<HasEmbeddedTool>(
+           findEmbeddedSymbol("LLVMHasEmbeddedTool"));

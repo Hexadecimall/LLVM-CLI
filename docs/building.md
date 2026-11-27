@@ -226,3 +226,20 @@ upstream Clang depfile patch applies this mapping when writing depfiles while
 preserving the module dependency graph, standalone behavior, and `-MG` names.
 `tools/probe_dependency_file.py` checks the patched writer directly. That
 patch needs a rebuilt container before installed compiler invocations gain it.
+
+To link the Linux and Windows core candidates from these retained inputs:
+
+```sh
+python3 -B tools/prepare_windows_runtime.py --zig-lib /path/to/zig/lib --imports-only
+python3 -B tools/linux_build.py --platform linux --build --targets llvm-driver
+python3 -B tools/link_host_cli.py linux
+python3 -B tools/linux_build.py --platform windows --build --targets llvm-driver
+python3 -B tools/link_host_cli.py windows
+```
+
+The host candidates read the same staged resource pack from an ELF section or
+PE resource. Clang, LLD, and the LLVM multicall tools are linked into the host
+image. The Windows driver isolates nested jobs by invoking the same executable
+through the Windows process API. The Linux driver uses its existing fork path.
+Standalone tools outside the multicall driver still need host builds and
+packaging before these candidates can pass the release tool inventory check.

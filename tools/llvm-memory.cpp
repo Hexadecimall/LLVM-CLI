@@ -22,9 +22,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #if defined(__APPLE__)
@@ -34,11 +34,18 @@
 #elif defined(__linux__)
 #include <linux/memfd.h>
 #include <sys/syscall.h>
+#elif defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
 #endif
 #include <ranges>
+#ifndef _WIN32
+#include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -55,6 +62,12 @@ extern "C" int LLVM_llvm_main(int argc, char **argv);
 
 namespace {
 
+#ifdef _WIN32
+#define LLVM_CLI_EXPORT __declspec(dllexport)
+#else
+#define LLVM_CLI_EXPORT __attribute__((visibility("default")))
+#endif
+
 struct Entry {
   llvm_pack::EntryHeader Header{};
   std::string Path;
@@ -66,12 +79,68 @@ std::unordered_map<std::string, std::size_t> ByPath;
 int (*CurrentEntrypoint)(int, char **) = nullptr;
 std::string CurrentBundleName;
 std::string MainExecutablePath;
+#ifdef _WIN32
+std::wstring MainExecutableWidePath;
+
+std::string utf8(const wchar_t *value) {
+  const int length = ::WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+  if (!length)
+    return {};
+  std::string result(length, '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), length, nullptr, nullptr);
+  result.pop_back();
+  return result;
+}
+
+bool appendWindowsArgument(std::wstring &command, const std::string &argument) {
+  const int length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argument.c_str(), -1, nullptr, 0);
+  if (!length)
+    return false;
+  std::wstring wide(length, L'\0');
+  ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argument.c_str(), -1, wide.data(), length);
+  wide.pop_back();
+  command += L" \"";
+  std::size_t escapes = 0;
+  for (wchar_t ch : wide) {
+    if (ch == L'\\') {
+      ++escapes;
+      continue;
+    }
+    command.append(ch == L'"' ? 2 * escapes + 1 : escapes, L'\\');
+    escapes = 0;
+    command += ch;
+  }
+  command.append(2 * escapes, L'\\');
+  command += L'"';
+  return true;
+}
+
+int runWindowsWorker(const std::vector<std::string> &arguments) {
+  std::wstring command = L"\"" + MainExecutableWidePath + L"\"";
+  for (const auto &argument : arguments)
+    if (!appendWindowsArgument(command, argument))
+      return 127;
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (!::CreateProcessW(MainExecutableWidePath.c_str(), command.data(), nullptr,
+                        nullptr, TRUE, 0, nullptr, nullptr, &startup, &process))
+    return 127;
+  ::CloseHandle(process.hThread);
+  DWORD code = 127;
+  if (::WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0)
+    ::GetExitCodeProcess(process.hProcess, &code);
+  ::CloseHandle(process.hProcess);
+  return static_cast<int>(code);
+}
+#endif
 std::string ActiveCompileTarget;
 bool ActiveNativeCxxHeaders = false;
 bool ActiveSdkHeaders = false;
 
 std::string baseName(const char *path);
 
+#ifndef _WIN32
 struct VirtualFile {
   std::vector<char> Bytes;
   off_t Offset = 0;
@@ -81,6 +150,7 @@ struct VirtualFile {
 std::mutex VirtualFilesMutex;
 std::unordered_map<int, VirtualFile> VirtualFiles;
 int NextVirtualFd = 100000;
+#endif
 
 bool initializeIndex() {
 #if defined(__APPLE__)
@@ -91,6 +161,13 @@ bool initializeIndex() {
   const auto *bytes = _binary_LLVM_pack_start;
   const std::size_t sectionSize = static_cast<std::size_t>(
       _binary_LLVM_pack_end - _binary_LLVM_pack_start);
+#elif defined(_WIN32)
+  const HRSRC resource = ::FindResourceW(nullptr, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(10));
+  if (!resource)
+    return false;
+  const HGLOBAL loaded = ::LoadResource(nullptr, resource);
+  const auto *bytes = static_cast<const std::uint8_t *>(::LockResource(loaded));
+  const std::size_t sectionSize = ::SizeofResource(nullptr, resource);
 #else
 #error Unsupported host image format
 #endif
@@ -184,6 +261,7 @@ std::string packedPathForVirtual(std::string_view path) {
   return {};
 }
 
+#ifndef _WIN32
 ino_t virtualInode(std::string_view path) {
   std::uint64_t hash = 14695981039346656037ULL;
   for (unsigned char byte : path) {
@@ -191,6 +269,15 @@ ino_t virtualInode(std::string_view path) {
     hash *= 1099511628211ULL;
   }
   return static_cast<ino_t>(hash == 0 ? 1 : hash);
+}
+#endif
+
+void setEnvironment(const char *name, const char *value) {
+#ifdef _WIN32
+  ::_putenv_s(name, value);
+#else
+  ::setenv(name, value, 1);
+#endif
 }
 
 std::string resolveTool(std::string requested) {
@@ -241,7 +328,7 @@ void configureAppleSdk() {
     return;
   if (findEntry("root/targets/macos/SDKSettings.json") &&
       findEntry("root/targets/macos/usr/lib/libSystem.tbd")) {
-    ::setenv("SDKROOT", "/__llvm/targets/macos", 1);
+    setEnvironment("SDKROOT", "/__llvm/targets/macos");
     return;
   }
 #if defined(__APPLE__)
@@ -262,7 +349,7 @@ void configureAppleSdk() {
   struct stat status {};
   for (const std::string &candidate : candidates) {
     if (::stat(candidate.c_str(), &status) == 0 && S_ISDIR(status.st_mode)) {
-      ::setenv("SDKROOT", candidate.c_str(), 1);
+      setEnvironment("SDKROOT", candidate.c_str());
       return;
     }
   }
@@ -276,8 +363,8 @@ bool configureEmbeddedPython() {
       "/__llvm/lib";
   if (!findEntry("root/deps/lib/python314.zip"))
     return false;
-  ::setenv("PYTHONHOME", "/__llvm/deps", 1);
-  ::setenv("PYTHONPATH", path, 1);
+  setEnvironment("PYTHONHOME", "/__llvm/deps");
+  setEnvironment("PYTHONPATH", path);
   return true;
 }
 
@@ -579,12 +666,20 @@ bool hasArgumentPrefix(int argc, char **argv, int firstArgument,
 enum class LinkFlavor { Unknown, Elf, MachO, Coff, Wasm, Conflict };
 
 LinkFlavor linkFlavorFromFile(std::string_view path) {
+#ifdef _WIN32
+  std::array<unsigned char, 8> bytes{};
+  std::ifstream input(std::filesystem::path(std::u8string(path.begin(), path.end())),
+                      std::ios::binary);
+  input.read(reinterpret_cast<char *>(bytes.data()), bytes.size());
+  const auto count = input.gcount();
+#else
   const int fd = ::open(std::string(path).c_str(), O_RDONLY);
   if (fd < 0)
     return LinkFlavor::Unknown;
   std::array<unsigned char, 8> bytes{};
   const ssize_t count = ::read(fd, bytes.data(), bytes.size());
   ::close(fd);
+#endif
   if (count < 4)
     return LinkFlavor::Unknown;
   if (bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
@@ -789,8 +884,8 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
     }
     const std::string memoryPath = "/proc/self/fd/" + std::to_string(fd);
     void *module = ::dlopen(memoryPath.c_str(), RTLD_NOW | RTLD_LOCAL);
-    ::close(fd);
     if (!module) {
+      ::close(fd);
       std::cerr << "LLVM: cannot load " << bundleName << ": "
                 << ::dlerror() << '\n';
       return 1;
@@ -804,6 +899,9 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
                 << ": " << ::dlerror() << '\n';
       return 1;
     }
+#elif defined(_WIN32)
+    std::cerr << "LLVM: embedded COFF module loading is unavailable for " << bundleName << '\n';
+    return 1;
 #endif
   }
   CurrentEntrypoint = entrypoint;
@@ -853,10 +951,15 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
   const CompileTarget *platform = rawTarget.empty() ? compileTarget :
       knownRawTarget ? &rawPlatform : nullptr;
   const bool defaultPlatform = rawTarget.empty() && !crossTarget;
-  const bool applePlatform = defaultPlatform || (platform &&
+#ifdef __APPLE__
+  const bool defaultApple = defaultPlatform;
+#else
+  const bool defaultApple = false;
+#endif
+  const bool applePlatform = defaultApple || (platform &&
       (platform->Os == "macos" || platform->Os == "ios" || platform->Os == "tvos" ||
        platform->Os == "watchos" || platform->Os == "visionos"));
-  const bool nativeMacRuntime = defaultPlatform || (platform && platform->Os == "macos");
+  const bool nativeMacRuntime = defaultApple || (platform && platform->Os == "macos");
   const bool x86MacRuntime = platform && platform->Os == "macos" &&
       platform->Arch == "x86_64";
   const std::string nativeCxxRuntimeRoot = x86MacRuntime
@@ -877,13 +980,16 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       ActiveSdkHeaders = true;
   }
   const bool bundledRuntime = !crossTarget || compileTarget->Os == "macos";
+  const bool gnuLinux = crossTarget && compileTarget->Requested == "x86_64-linux-gnu";
   const bool embeddedLibc = crossTarget && isClangDriver(invokedName) &&
       (compileTarget->Requested == "x86_64-linux-musl" ||
+       gnuLinux ||
        compileTarget->Requested == "aarch64-linux-musl" ||
        compileTarget->Requested == "wasm32-wasi" ||
        compileTarget->Requested == "x86_64-windows-gnu") &&
       findEntry("root/targets/" + compileTarget->Requested + "/lib/" +
-                (compileTarget->Os == "windows" ? "zigc.lib" : "libc.a"));
+                (compileTarget->Os == "windows" ? "zigc.lib" :
+                 gnuLinux ? "libc.so.6" : "libc.a"));
   const bool useEmbeddedLibc = embeddedLibc &&
       invokedName != "clang-cpp" && invokedName != "clang-cl" &&
       !hasUserSysroot(argc, argv, firstArgument) &&
@@ -906,6 +1012,13 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
                  "PE, or omit -static for system DLL imports\n";
     return 2;
   }
+  if (gnuLinux && useEmbeddedLibc && isDriverLink(argc, argv, firstArgument) &&
+      (hasArgument(argc, argv, firstArgument, "-static") ||
+       hasArgument(argc, argv, firstArgument, "-static-pie"))) {
+    std::cerr << "LLVM: static GNU/Linux linking requires a GNU sysroot with static libc; "
+                 "the embedded GNU runtime supports dynamic executables and shared libraries\n";
+    return 2;
+  }
   const bool sharedLink = hasArgument(argc, argv, firstArgument, "-shared") ||
       (hasArgument(argc, argv, firstArgument, "-dynamic") &&
        (!compileTarget || compileTarget->Os != "linux"));
@@ -914,7 +1027,7 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       hasArgument(argc, argv, firstArgument, "-Wl,-Bdynamic") ||
       hasArgument(argc, argv, firstArgument, "-pie");
   const bool dynamicExecutable = crossTarget &&
-      compileTarget->Os == "linux" && dynamicLink && !sharedLink &&
+      compileTarget->Os == "linux" && (dynamicLink || gnuLinux) && !sharedLink &&
       !hasArgument(argc, argv, firstArgument, "-static") &&
       !hasArgument(argc, argv, firstArgument, "-static-pie");
   const bool embeddedCpp = embeddedLibc && invokedName == "clang++" &&
@@ -924,7 +1037,7 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
   if (crossTarget) {
     if (useEmbeddedLibc && dynamicExecutable &&
         !findEntry("root/targets/" + compileTarget->Requested +
-                   "/lib/libc.so")) {
+                   (gnuLinux ? "/lib/libc.so.6" : "/lib/libc.so"))) {
       std::cerr << "LLVM: dynamic Linux executables for '"
                 << compileTarget->Requested
                 << "' need --sysroot with a target dynamic libc and loader\n";
@@ -962,6 +1075,15 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
   }
   if (isClangDriver(invokedName) && !recursiveFrontend) {
     const bool driverLink = isDriverLink(argc, argv, firstArgument);
+#ifdef _WIN32
+    // Darwin's SDKROOT fallback uses the host's definition of an absolute
+    // path, which requires a drive letter on Windows.
+    if (applePlatform && !hasUserSysroot(argc, argv, firstArgument))
+      if (const char *sdk = std::getenv("SDKROOT"); sdk && *sdk) {
+        arguments.push_back(const_cast<char *>("-isysroot"));
+        arguments.push_back(const_cast<char *>(sdk));
+      }
+#endif
     if (applePlatform && driverLink &&
         (hasArgument(argc, argv, firstArgument, "-nodefaultlibs") ||
          hasArgument(argc, argv, firstArgument, "-nostdlib")) &&
@@ -1003,7 +1125,8 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       if (embeddedCpp &&
           !hasArgument(argc, argv, firstArgument, "-nostdinc++")) {
         arguments.push_back(const_cast<char *>("-nostdinc++"));
-        for (std::string_view option : {
+        if (compileTarget->Requested.ends_with("-musl"))
+          for (std::string_view option : {
                  "-D_LIBCPP_ABI_VERSION=1",
                  "-D_LIBCPP_ABI_NAMESPACE=__1",
                  "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE",
@@ -1037,6 +1160,10 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
                          "aarch64-linux-any", "any-linux-any"};
       else if (compileTarget->Os == "windows")
         includeLayers = {"any-windows-any"};
+      else if (gnuLinux) {
+        includeLayers = {"gnu"};
+        arguments.push_back(const_cast<char *>("-D__GLIBC_MINOR__=17"));
+      }
       else
         includeLayers = {"wasm-wasi-musl", "generic-musl"};
       for (std::size_t index = 0; index < includeLayers.size(); ++index) {
@@ -1064,13 +1191,25 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
           targetRuntimeFiles.emplace_back(targetRoot + "/lib/" +
               (compileTarget->Os == "wasi" ? "crt1-command.o" :
                compileTarget->Os == "windows" ? "crt2.obj" :
-               dynamicExecutable &&
+               gnuLinux ? "crt1.o" : dynamicExecutable &&
                !hasArgument(argc, argv, firstArgument, "-no-pie")
                    ? "Scrt1.o" : "crt1.o"));
           arguments.push_back(targetRuntimeFiles.back().data());
         } else if (compileTarget->Os == "windows") {
           targetRuntimeFiles.emplace_back(targetRoot + "/lib/dllcrt2.obj");
           arguments.push_back(targetRuntimeFiles.back().data());
+        }
+        if (gnuLinux) {
+          targetRuntimeFiles.emplace_back(targetRoot + "/lib/crtbegin.o");
+          arguments.push_back(targetRuntimeFiles.back().data());
+          arguments.push_back(const_cast<char *>("-Wl,--start-group"));
+        }
+        if (embeddedCpp && !hasArgument(argc, argv, firstArgument, "-nostdlib++") &&
+            (gnuLinux || compileTarget->Os == "windows")) {
+          for (std::string_view name : {"libc++.a", "libc++abi.a", "libunwind.a"}) {
+            targetRuntimeFiles.emplace_back(targetRoot + "/lib/" + std::string(name));
+            arguments.push_back(targetRuntimeFiles.back().data());
+          }
         }
         if (compileTarget->Os == "windows") {
           if (!hasArgumentPrefix(argc, argv, firstArgument, "-Wl,-e,") &&
@@ -1095,6 +1234,15 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
             arguments.push_back(targetRuntimeFiles.back().data());
           }
           arguments.push_back(const_cast<char *>("-Wl,--end-group"));
+        } else if (gnuLinux) {
+          for (std::string_view name : {"libc_nonshared.a", "libcompiler_rt.a", "libc.so.6",
+                                       "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1"}) {
+            targetRuntimeFiles.emplace_back(targetRoot + "/lib/" + std::string(name));
+            arguments.push_back(targetRuntimeFiles.back().data());
+          }
+          arguments.push_back(const_cast<char *>("-Wl,--end-group"));
+          targetRuntimeFiles.emplace_back(targetRoot + "/lib/crtend.o");
+          arguments.push_back(targetRuntimeFiles.back().data());
         } else {
           if (embeddedCpp &&
               !hasArgument(argc, argv, firstArgument, "-nostdlib++") &&
@@ -1248,7 +1396,13 @@ int runScript(const std::string &name, int argc, char **argv,
 
 std::string baseName(const char *path) {
   std::string value = path ? path : "LLVM";
+#ifdef _WIN32
+  const std::size_t slash = value.find_last_of("/\\");
+  if (value.ends_with(".exe"))
+    value.resize(value.size() - 4);
+#else
   const std::size_t slash = value.find_last_of('/');
+#endif
   return slash == std::string::npos ? value : value.substr(slash + 1);
 }
 
@@ -1668,6 +1822,7 @@ int doctor() {
 
 } // namespace
 
+#ifndef _WIN32
 extern "C" __attribute__((visibility("default"))) int
 open(const char *path, int flags, ...) {
   if (path && std::string_view(path).starts_with("/__llvm/")) {
@@ -1843,8 +1998,9 @@ fcntl(int fd, int command, ...) {
   va_end(arguments);
   return realFcntl(fd, command, argument);
 }
+#endif
 
-extern "C" __attribute__((visibility("default"))) void
+extern "C" LLVM_CLI_EXPORT void
 LLVMEnumerateEmbeddedFiles(
     void (*visitor)(const char *, const void *, std::size_t, void *),
     void *context) {
@@ -1890,7 +2046,7 @@ LLVMEnumerateEmbeddedFiles(
   }
 }
 
-extern "C" __attribute__((visibility("default"))) bool
+extern "C" LLVM_CLI_EXPORT bool
 LLVMHasEmbeddedTool(const char *path) {
   const std::string requested = canonicalTool(baseName(path));
   const bool found = path &&
@@ -1901,16 +2057,40 @@ LLVMHasEmbeddedTool(const char *path) {
   return found;
 }
 
-extern "C" __attribute__((visibility("default"))) const char *
+#ifdef _WIN32
+extern "C" LLVM_CLI_EXPORT bool
+LLVMReadEmbeddedFile(const char *path,
+                     void (*visitor)(const void *, std::size_t, void *),
+                     void *context) {
+  std::string normalized(path);
+  std::ranges::replace(normalized, '\\', '/');
+  const Entry *entry = findResolvedEntry(packedPathForVirtual(normalized));
+  if (!entry || entry->Header.Type != llvm_pack::EntryType::File)
+    return false;
+  const auto bytes = decompress(*entry);
+  if (bytes.empty() && entry->Header.OriginalSize)
+    return false;
+  visitor(bytes.data(), bytes.size(), context);
+  return true;
+}
+#endif
+
+extern "C" LLVM_CLI_EXPORT const char *
 LLVMExecutablePath() {
   return MainExecutablePath.c_str();
 }
 
-extern "C" __attribute__((visibility("default"))) int
+extern "C" LLVM_CLI_EXPORT int
 LLVMRunEmbeddedTool(const char *program, const char *const *arguments,
                     std::size_t argumentCount) {
   if (!CurrentEntrypoint || argumentCount == 0)
     return 127;
+#ifdef _WIN32
+  std::vector<std::string> worker{"--llvm-internal-worker", canonicalTool(baseName(program))};
+  for (std::size_t index = 1; index < argumentCount; ++index)
+    worker.emplace_back(arguments[index]);
+  return runWindowsWorker(worker);
+#else
   const pid_t child = ::fork();
   if (child < 0)
     return 127;
@@ -1940,10 +2120,33 @@ LLVMRunEmbeddedTool(const char *program, const char *const *arguments,
   if (WIFSIGNALED(status))
     return 128 + WTERMSIG(status);
   return 127;
+#endif
 }
 
 int main(int argc, char **argv) {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  std::wstring path(32768, L'\0');
+  const DWORD length = ::GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+  if (!length || length >= path.size())
+    return 127;
+  path.resize(length);
+  MainExecutableWidePath = std::move(path);
+  MainExecutablePath = utf8(MainExecutableWidePath.c_str());
+  int wideCount = 0;
+  wchar_t **wideArguments = ::CommandLineToArgvW(::GetCommandLineW(), &wideCount);
+  if (!wideArguments)
+    return 127;
+  std::vector<std::string> utf8Arguments;
+  for (int index = 0; index < wideCount; ++index)
+    utf8Arguments.push_back(utf8(wideArguments[index]));
+  ::LocalFree(wideArguments);
+  std::vector<char *> utf8Pointers;
+  for (auto &argument : utf8Arguments)
+    utf8Pointers.push_back(argument.data());
+  utf8Pointers.push_back(nullptr);
+  argc = wideCount;
+  argv = utf8Pointers.data();
+#elif defined(__APPLE__)
   uint32_t executablePathSize = 0;
   if (_NSGetExecutablePath(nullptr, &executablePathSize) == -1 &&
       executablePathSize != 0) {
@@ -1966,6 +2169,13 @@ int main(int argc, char **argv) {
     std::cerr << "LLVM: embedded payload is missing or corrupt\n";
     return 1;
   }
+#ifdef _WIN32
+  if (argc >= 3 && std::string_view(argv[1]) == "--llvm-internal-worker") {
+    const std::string name = canonicalTool(argv[2]);
+    const std::string bundle = resolveTool(name);
+    return bundle.empty() ? 127 : runBundle(bundle, name, argc, argv, 3);
+  }
+#endif
   const std::string invokedAs = baseName(argc ? argv[0] : nullptr);
   const bool dispatcher = invokedAs == "LLVM" || invokedAs == "llvm" ||
       (resolveTool(invokedAs).empty() && !hasScript(invokedAs));
@@ -2051,6 +2261,13 @@ int main(int argc, char **argv) {
   }
   const BuildInvoke invokeBuildCompiler = [&](std::string_view compiler,
       std::string_view target, const std::vector<std::string> &options) {
+#if defined(__linux__)
+    if (target.empty() || target == "native")
+      target = "x86_64-linux-gnu";
+#elif defined(_WIN32)
+    if (target.empty() || target == "native")
+      target = "x86_64-windows-gnu";
+#endif
     CompileTarget parsed;
     if (!target.empty() && !parseCompileTarget(target, parsed)) {
       std::cerr << "LLVM build: invalid target '" << target << "'\n";
@@ -2059,6 +2276,15 @@ int main(int argc, char **argv) {
     if (target.empty() || parsed.Os == "macos")
       configureAppleSdk();
     ActiveCompileTarget = target.empty() ? "" : parsed.Requested;
+#ifdef _WIN32
+    std::vector<std::string> command{std::string(compiler)};
+    if (!target.empty()) {
+      command.emplace_back("-compile-target");
+      command.emplace_back(target);
+    }
+    command.insert(command.end(), options.begin(), options.end());
+    return runWindowsWorker(command);
+#else
     const pid_t child = ::fork();
     if (child < 0) {
       std::cerr << "LLVM build: cannot start embedded compiler: "
@@ -2087,6 +2313,7 @@ int main(int argc, char **argv) {
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) :
            WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+#endif
   };
   std::string requested;
   int firstArgument = 1;
@@ -2187,6 +2414,22 @@ int main(int argc, char **argv) {
     requested = invokedAs;
   }
   requested = canonicalTool(std::move(requested));
+#if defined(__linux__) || defined(_WIN32)
+  if (isClangDriver(requested) && requested != "clang-cl" &&
+      (!selectedTarget || compileTarget.Requested == "native") &&
+      !hasArgument(argc, argv, firstArgument, "-target") &&
+      !hasArgument(argc, argv, firstArgument, "--target") &&
+      !hasArgumentPrefix(argc, argv, firstArgument, "--target=") &&
+      !hasArgumentPrefix(argc, argv, firstArgument, "-target=")) {
+#ifdef _WIN32
+    parseCompileTarget("x86_64-windows-gnu", compileTarget);
+#else
+    parseCompileTarget("x86_64-linux-gnu", compileTarget);
+#endif
+    selectedTarget = true;
+    ActiveCompileTarget = compileTarget.Requested;
+  }
+#endif
   if (requested == "ld" || requested == "lld") {
     if (!hasArgument(argc, argv, firstArgument, "-flavor") &&
         !hasArgumentPrefix(argc, argv, firstArgument, "-flavor=") &&
