@@ -123,6 +123,10 @@ def build_cxx_runtime(volume, root, compiler, flags, jobs, system="Linux",
                "-DLIBCXX_ABI_NAMESPACE=__1", "-DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=OFF",
                "-DLIBCXXABI_USE_LLVM_UNWINDER=ON", "-DLIBUNWIND_USE_COMPILER_RT=ON"]
     command += ["-DLLVM_APPEND_VC_REV=OFF", "-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON"]
+    if system == "Linux":
+        # The glibc 2.17 import ABI predates this symbol. Static try-compiles
+        # cannot detect that, so select libc++abi's upstream weak fallback.
+        command.append("-DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF")
     with (root / "cxx-build.log").open("a") as log:
         run(command, environment, log)
         run(["cmake", "--build", runtime, "--target", "cxx", "cxxabi", "unwind",

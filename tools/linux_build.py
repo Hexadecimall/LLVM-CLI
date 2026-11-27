@@ -55,6 +55,8 @@ def configure(volume, compiler, platform="linux"):
         c_headers = []
     cxx_flags = shlex.join([*compile_flags, "-nostdinc++", "-isystem", str(cxx / "include/c++/v1"), *c_headers])
     compile_flags = shlex.join([*compile_flags, *c_headers])
+    startup += ["-Wl,--thinlto-cache-dir=" + str(build.parent / "image/thinlto"),
+                "-Wl,--thinlto-cache-policy=cache_size_bytes=384m"]
     startup, standard = shlex.join(startup), shlex.join(standard)
     command = ["cmake", "-S", volume / "source/llvm", "-B", build,
                "-G", "Unix Makefiles", "-DCMAKE_SYSTEM_NAME=" + platform.capitalize(),

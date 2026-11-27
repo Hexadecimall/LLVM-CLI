@@ -2,6 +2,7 @@
 """Link native Linux and Windows CLI candidates from the shared host workspace."""
 
 import argparse
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -43,16 +44,26 @@ def compression_source(volume):
     return source / "lib"
 
 def reuse(source, destination):
-    if destination.exists() or destination.is_symlink():
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
-        destination.symlink_to(os.readlink(source))
+        if destination.is_symlink() and os.readlink(destination) == os.readlink(source):
+            return
+    elif destination.is_file() and os.path.samefile(source, destination):
+        return
+    elif destination.is_file():
+        old, current = destination.stat(), source.stat()
+        if (old.st_size, old.st_mtime_ns) == (current.st_size, current.st_mtime_ns):
+            return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    pending = destination.with_name(destination.name + ".next")
+    pending.unlink(missing_ok=True)
+    if source.is_symlink():
+        pending.symlink_to(os.readlink(source))
     else:
         try:
-            os.link(source, destination)
+            os.link(source, pending)
         except OSError:
-            shutil.copyfile(source, destination)
+            shutil.copy2(source, pending)
+    os.replace(pending, destination)
 
 
 def stage_tree(source, destination):
@@ -72,8 +83,8 @@ def stage_payload(volume, build, output, packer, run):
     payload = output / "payload"
     retained = PROJECT / "recovered/llvm-all/inmemory/payload/root"
     overlay = volume / "overlay/root"
-    stage_tree(retained / "targets", payload / "root/targets")
-    stage_tree(overlay / "targets", payload / "root/targets")
+    for targets in (retained / "targets", overlay / "targets"):
+        stage_tree(targets, payload / "root/targets")
     stage_tree(overlay / "lib/clang/23", payload / "root/lib/clang/23")
     stage_tree(overlay / "include/c++", payload / "root/include/c++")
     for name in ("libc++.a", "libc++abi.a", "libunwind.a"):
@@ -129,7 +140,7 @@ def compiler_commands(build, compiler):
     return flags, link
 
 
-def link_cli(volume, platform, compiler, prepare_only):
+def link_cli(volume, platform, compiler, prepare_only, refresh_pack=False):
     host = volume / "hosts" / (platform + "-x86_64")
     build = host / "build"
     output = host / "image"
@@ -146,9 +157,11 @@ def link_cli(volume, platform, compiler, prepare_only):
             subprocess.run(list(map(str, command)), cwd=cwd, env=environment,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
 
-        pack = shared / "LLVM.pack"
-        if not pack.is_file():
-            pack = stage_payload(volume, build, shared, volume / "tools/llvm-pack", run)
+        with (shared / "pack.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            pack = shared / "LLVM.pack"
+            if refresh_pack or not pack.is_file():
+                pack = stage_payload(volume, build, shared, volume / "tools/llvm-pack", run)
         objects = []
         c_flags = flags + ["-O3", "-flto=thin", "-DZSTD_DISABLE_ASM=1",
                            "-I" + str(compression), "-I" + str(bzip)]
@@ -180,8 +193,6 @@ def link_cli(volume, platform, compiler, prepare_only):
             exported = ("LLVMEnumerateEmbeddedFiles", "LLVMHasEmbeddedTool", "LLVMExecutablePath",
                         "LLVMRunEmbeddedTool", "open", "read", "pread", "lseek", "close", "fstat", "stat", "fcntl")
             objects.extend("-Wl,--export-dynamic-symbol=" + name for name in exported)
-            objects.extend(["-Wl,--thinlto-cache-dir=" + str(output / "thinlto"),
-                            "-Wl,--thinlto-cache-policy=cache_size_bytes=384m"])
             link = [str(core) if token.endswith("/llvm-driver.cpp.o") else token for token in link]
         else:
             objects.append("-L" + str(volume / "runtime-work/windows-gnu/imports"))
@@ -204,6 +215,9 @@ def link_cli(volume, platform, compiler, prepare_only):
         destination = output / ("LLVM.exe" if platform == "windows" else "LLVM")
         candidate = destination.with_name(destination.stem + ".next" + destination.suffix)
         link[link.index("-o") + 1] = str(candidate)
+        if not any(token.startswith("-Wl,--thinlto-cache-dir=") for token in link):
+            objects.extend(["-Wl,--thinlto-cache-dir=" + str(output / "thinlto"),
+                            "-Wl,--thinlto-cache-policy=cache_size_bytes=384m"])
         run([*link[:2], *objects, "-Wl,-s", *link[2:]], cwd=build / "tools")
         os.replace(candidate, destination)
     print(destination)
@@ -214,5 +228,6 @@ if __name__ == "__main__":
     parser.add_argument("platform", choices=("linux", "windows"))
     parser.add_argument("--compiler", type=Path, default=Path(shutil.which("llvm") or "llvm"))
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--refresh-pack", action="store_true")
     args = parser.parse_args()
-    link_cli(workspace(), args.platform, args.compiler.absolute(), args.prepare_only)
+    link_cli(workspace(), args.platform, args.compiler.absolute(), args.prepare_only, args.refresh_pack)
