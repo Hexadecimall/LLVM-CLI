@@ -164,3 +164,24 @@
        using HasEmbeddedTool = bool (*)(const char *);
        auto HasTool = reinterpret_cast<HasEmbeddedTool>(
            findEmbeddedSymbol("LLVMHasEmbeddedTool"));
+--- a/llvm/lib/Support/VirtualFileSystem.cpp
++++ b/llvm/lib/Support/VirtualFileSystem.cpp
+@@ -146,6 +146,18 @@
+ }
+ 
+ std::error_code FileSystem::makeAbsolute(SmallVectorImpl<char> &Path) const {
++#ifdef _WIN32
++  const StringRef Name(Path.data(), Path.size());
++  // The embedded resource root has no Windows drive. Keep the same
++  // canonical path before and after the overlay inherits the real CWD.
++  if (Name == "/__llvm" || Name == "\\__llvm" ||
++      Name.starts_with("/__llvm/") || Name.starts_with("\\__llvm\\")) {
++    for (char &Character : Path)
++      if (Character == '\\')
++        Character = '/';
++    return {};
++  }
++#endif
+   if (llvm::sys::path::is_absolute(Path))
+     return {};
+ 
