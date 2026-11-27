@@ -101,7 +101,7 @@ jobs:
                   output = Path('hello.exe' if platform == 'windows' else 'hello').absolute()
                   target = 'x86_64-windows-gnu' if platform == 'windows' else 'x86_64-linux-gnu'
                   invoke(['cc', '-###', '-compile-target', target, str(source), '-o', str(output)])
-                  invoke(['cc', '-compile-target', target, str(source), '-o', str(output)])
+                  invoke(['cc', '-v', '-compile-target', target, str(source), '-o', str(output)])
                   result = subprocess.run([str(output)], env=environment, text=True,
                                           capture_output=True, timeout=30, check=True)
                   assert result.stdout.strip() == 'embedded hello'
