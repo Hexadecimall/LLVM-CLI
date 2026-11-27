@@ -10,10 +10,9 @@ The source container now has an ELF pack-symbol path and a Linux memory-backed
 module loader using `memfd_create` and `dlopen`. LLVM-CLI itself compiled
 `tools/llvm-memory.cpp` to a Linux ELF object. LLVM-CLI also converted a
 small resource to an ELF object and compiled the same resource into a PE
-`.res` file. Those are host-port building blocks, not a runnable native
-edition: the LLVM tool modules and their dependencies must still be rebuilt
-for each host. The Windows container loader and PE pack access remain to be
-implemented.
+`.res` file. The Windows container reads its pack from a PE resource and
+dispatches multicall tools linked into the executable. Standalone Windows
+tool modules still require a native loader and their dependency closure.
 
 Darwin libc headers, `libSystem` text stubs, Clang-compatible target metadata,
 and Apple Silicon/Intel macOS C++ archives are now staged as embedded target
@@ -53,7 +52,13 @@ Current verification:
 - The Windows C++ equivalent is blocked by the absent embedded libc++
   headers and archives; external headers alone were insufficient without
   target-specific libc++ configuration.
-- No native Linux or Windows LLVM-CLI executable has been built or run yet.
+- The x86-64 Linux core candidate ran on Ubuntu 24.04. Built-in Clang
+  compiled and linked C and C++ programs that ran on Linux. The same binary
+  produced macOS and WASI executables and ran its embedded bitcode tools.
+  The checked configuration used an empty `PATH` and system glibc libraries.
+  [Native CLI validation](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45919215950)
+- The first Windows CLI core build is in progress. The Windows C++ runtime
+  has already passed a separate native execution check.
 
 The [native probe run](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45874191759)
 executed locally cross-built C++ programs on Ubuntu 24.04 and Windows Server
