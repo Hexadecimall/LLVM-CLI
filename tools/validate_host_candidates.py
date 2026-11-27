@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -14,6 +16,28 @@ from macos_build import PROJECT, workspace
 from prepare_release import validate_host_format
 from publish_release import api
 from upload_release_asset import sha256
+
+
+def system_dependencies(binary, platform):
+    compiler = shutil.which("llvm")
+    if not compiler:
+        raise RuntimeError("LLVM-CLI is required to inspect host dependencies")
+    option = "--coff-imports" if platform == "windows" else "--needed-libs"
+    report = subprocess.check_output([compiler, "readobj", option, str(binary)], text=True)
+    if platform == "windows":
+        libraries = re.findall(r"^  Name: (.+)$", report, re.M)
+        system_dlls = {"advapi32", "bcrypt", "crypt32", "dbghelp", "kernel32",
+                       "ntdll", "ole32", "psapi", "shell32", "ucrtbase", "user32",
+                       "version", "winhttp", "ws2_32"}
+        unexpected = [name for name in libraries if not name.lower().startswith("api-ms-win-crt-")
+                      and name.lower().removesuffix(".dll") not in system_dlls]
+    else:
+        report = report.split("NeededLibraries [\n", 1)[-1].split("]", 1)[0]
+        libraries = report.split()
+        unexpected = set(libraries) - {"libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"}
+    if not libraries or unexpected:
+        raise ValueError("unexpected host dependencies: " + ", ".join(sorted(unexpected)))
+    return libraries
 
 
 def validate(volume, platforms):
@@ -41,6 +65,7 @@ def validate(volume, platforms):
         suffix = ".exe" if platform == "windows" else ""
         binary = volume / "hosts" / (platform + "-x86_64") / "image" / ("LLVM" + suffix)
         validate_host_format(platform + "-x86_64", binary)
+        print(platform + " system libraries: " + ", ".join(system_dependencies(binary, platform)), flush=True)
         problems = check_binary(binary)
         if problems:
             raise ValueError("\n".join(problems))
