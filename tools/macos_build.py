@@ -33,10 +33,11 @@ def workspace():
     if not image.exists():
         if shutil.disk_usage(PROJECT).free < 40 * 1024 ** 3:
             raise RuntimeError("at least 40 GiB free is required before starting")
-        capacity = RELEASE["workspace_limit_gib"] - 1
-        if capacity <= 0 or capacity >= 25:
+        # Keep room for the installed macOS executable outside the image.
+        capacity_mib = RELEASE["workspace_limit_gib"] * 1024 - 2304
+        if capacity_mib <= 0 or capacity_mib >= 25 * 1024:
             raise RuntimeError("workspace capacity must remain below 25 GiB")
-        run(["hdiutil", "create", "-size", str(capacity) + "g", "-type", "SPARSE",
+        run(["hdiutil", "create", "-size", str(capacity_mib) + "m", "-type", "SPARSE",
              "-fs", "APFS", "-volname", "LLVMCLI236", "-nospotlight", image])
     volume.mkdir(exist_ok=True)
     if not volume.is_mount():
