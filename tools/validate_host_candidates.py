@@ -49,6 +49,7 @@ def validate(volume, platforms):
         if not name.exists():
             os.link(binary, name)
         manifest[platform + "-llvm"] = asset_for(name, digest)
+        name.unlink()
 
     encoded = (json.dumps(manifest, sort_keys=True) + "\n").encode()
     digest = hashlib.sha256(encoded).hexdigest()
@@ -65,4 +66,5 @@ def validate(volume, platforms):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", nargs="+", choices=("linux", "windows"))
+    args = parser.parse_args()
     validate(workspace(), args.platform)

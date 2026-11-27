@@ -184,11 +184,18 @@ def link_cli(volume, platform, compiler, prepare_only, refresh_pack=False):
         rename_entry(main, core, "LLVM_llvm_main", compiler, compiler,
                      symbol_prefix="", objcopy_args=("objcopy",))
         if platform == "linux":
+            modules = output / "modules"
+            if modules.is_dir():
+                linux_pack = output / "LLVM.pack"
+                pending = output / "LLVM.next.pack"
+                run([volume / "tools/llvm-pack", shared / "payload", pending, modules])
+                os.replace(pending, linux_pack)
+                pack = linux_pack
             packed = output / "LLVM.pack.o"
             # The relative binary input name defines the ELF symbols.
             run([compiler, "objcopy", "-I", "binary", "-O", "elf64-x86-64", "-B", "i386:x86-64",
                  "--rename-section", ".data=.rodata,alloc,load,readonly,data,contents", pack.name, packed],
-                cwd=shared)
+                cwd=pack.parent)
             objects.append(str(packed))
             exported = ("LLVMEnumerateEmbeddedFiles", "LLVMHasEmbeddedTool", "LLVMExecutablePath",
                         "LLVMRunEmbeddedTool", "open", "read", "pread", "lseek", "close", "fstat", "stat", "fcntl")

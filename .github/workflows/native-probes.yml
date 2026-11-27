@@ -90,10 +90,17 @@ jobs:
                   source.write_text('#include <stdio.h>\nint main(void) { puts("embedded hello"); }\n')
                   output = Path('hello.exe' if platform == 'windows' else 'hello').absolute()
                   target = 'x86_64-windows-gnu' if platform == 'windows' else 'x86_64-linux-gnu'
+                  invoke(['cc', '-###', '-compile-target', target, str(source), '-o', str(output)])
                   invoke(['cc', '-compile-target', target, str(source), '-o', str(output)])
                   result = subprocess.run([str(output)], env=environment, text=True,
                                           capture_output=True, timeout=30, check=True)
                   assert result.stdout.strip() == 'embedded hello'
+                  cpp = Path('hello.cpp')
+                  cpp.write_text('#include <iostream>\nint main() { std::cout << "embedded C++"; }\n')
+                  invoke(['c++', '-compile-target', target, str(cpp), '-o', str(output)])
+                  result = subprocess.run([str(output)], env=environment, text=True,
+                                          capture_output=True, timeout=30, check=True)
+                  assert result.stdout == 'embedded C++'
                   invoke(['cc', '-compile-target', 'aarch64-macos', str(source), '-o', 'hello-macos'])
                   assert Path('hello-macos').read_bytes()[:4] == bytes.fromhex('cffaedfe')
                   invoke(['cc', '-compile-target', 'wasm32-wasi', str(source), '-o', 'hello.wasm'])

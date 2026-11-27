@@ -1034,7 +1034,7 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       findEntry("root/targets/" + compileTarget->Requested +
                 "/lib/libc++.a") &&
       !hasUserSysroot(argc, argv, firstArgument);
-  if (crossTarget) {
+  if (crossTarget && !recursiveFrontend) {
     if (useEmbeddedLibc && dynamicExecutable &&
         !findEntry("root/targets/" + compileTarget->Requested +
                    (gnuLinux ? "/lib/libc.so.6" : "/lib/libc.so"))) {
@@ -1074,6 +1074,7 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
       arguments.push_back(const_cast<char *>("-nostdlib"));
   }
   if (isClangDriver(invokedName) && !recursiveFrontend) {
+    arguments.push_back(const_cast<char *>("-fintegrated-cc1"));
     const bool driverLink = isDriverLink(argc, argv, firstArgument);
 #ifdef _WIN32
     // Darwin's SDKROOT fallback uses the host's definition of an absolute
@@ -2417,6 +2418,7 @@ int main(int argc, char **argv) {
 #if defined(__linux__) || defined(_WIN32)
   if (isClangDriver(requested) && requested != "clang-cl" &&
       (!selectedTarget || compileTarget.Requested == "native") &&
+      (firstArgument >= argc || !std::string_view(argv[firstArgument]).starts_with("-cc1")) &&
       !hasArgument(argc, argv, firstArgument, "-target") &&
       !hasArgument(argc, argv, firstArgument, "--target") &&
       !hasArgumentPrefix(argc, argv, firstArgument, "--target=") &&
