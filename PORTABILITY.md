@@ -57,8 +57,16 @@ Current verification:
   produced macOS and WASI executables and ran its embedded bitcode tools.
   The checked configuration used an empty `PATH` and system glibc libraries.
   [Native CLI validation](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45919215950)
-- The first Windows CLI core build is in progress. The Windows C++ runtime
-  has already passed a separate native execution check.
+- The x86-64 Windows core candidate ran on Windows Server 2022 with an
+  empty `PATH`. Both host candidates built and ran C and C++ executables,
+  built and loaded a native shared library, cross-linked to the other host,
+  and produced macOS and WASI executables. The Windows executable imports
+  only system DLLs. Its nested linker jobs run the same embedded CLI image.
+  [Combined native validation](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45922454959)
+
+The [validation pre-release](https://github.com/Hexadecimall/LLVM-CLI/releases/tag/host-probes-23.1.6)
+contains the checked Linux and Windows core executables. The full suite
+inventory and stable installer assets for those hosts remain pending.
 
 The [native probe run](https://github.com/Hexadecimall/LLVM-CLI/actions/runs/45874191759)
 executed locally cross-built C++ programs on Ubuntu 24.04 and Windows Server
