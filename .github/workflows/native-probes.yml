@@ -86,6 +86,12 @@ jobs:
 
                   assert '23.1.6' in invoke(['cc', '--version'])
                   assert '23.1.6' in invoke(['nm', '--version'])
+                  if 'llvm-as' in invoke(['list']).splitlines():
+                      ir = Path('probe.ll')
+                      ir.write_text('define i32 @answer() { ret i32 42 }\n')
+                      invoke(['as', str(ir), '-o', 'probe.bc'])
+                      invoke(['llvm-link', 'probe.bc', '-o', 'linked.bc'])
+                      assert 'ret i32 42' in invoke(['dis', 'linked.bc', '-o', '-'])
                   source = Path('hello.c')
                   source.write_text('#include <stdio.h>\nint main(void) { puts("embedded hello"); }\n')
                   output = Path('hello.exe' if platform == 'windows' else 'hello').absolute()
