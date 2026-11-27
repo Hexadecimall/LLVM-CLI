@@ -2023,8 +2023,16 @@ LLVMEnumerateEmbeddedFiles(
     const bool targetResource = !ActiveCompileTarget.empty() &&
         entry.Path.starts_with("root/targets/" + ActiveCompileTarget +
                                "/include/");
+#ifdef _WIN32
+    // Windows cannot use POSIX stat/open interposition. Clang checks the
+    // existence of explicit archive and startup inputs through its VFS.
+    const bool targetLibraries = !ActiveCompileTarget.empty() &&
+        entry.Path.starts_with("root/targets/" + ActiveCompileTarget + "/lib/");
+#else
+    const bool targetLibraries = false;
+#endif
     if (!resourceHeader && !fortranModule && !targetResource && !nativeCxxHeader &&
-        !sdkHeader && !darwinResource)
+        !sdkHeader && !darwinResource && !targetLibraries)
       continue;
     const std::vector<char> bytes = decompress(entry);
     if (bytes.empty() && entry.Header.OriginalSize != 0)

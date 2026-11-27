@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       manifest_asset:
-        description: Release asset ID of the local prebuild validation manifest
+        description: Release asset name of the local prebuild validation manifest
         required: true
         type: string
       manifest_sha256:
@@ -40,12 +40,15 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
           import subprocess
           from urllib.request import Request, urlopen
 
           def download(asset, destination, expected, limit):
-              asset = int(asset)
-              url = f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/releases/assets/{asset}'
+              if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', asset):
+                  raise ValueError('invalid asset name')
+              repository = os.environ['GITHUB_REPOSITORY']
+              url = f'https://github.com/{repository}/releases/download/host-probes-23.1.6/{asset}'
               request = Request(url, headers={
                   'Accept': 'application/octet-stream',
                   'User-Agent': 'LLVM-CLI-native-validation',
@@ -74,7 +77,7 @@ jobs:
           for name in names:
               record = records[name]
               executable = Path(name + ('.exe' if platform == 'windows' else '')).absolute()
-              download(record['asset'], executable, record['sha256'], 512 * 1024**2)
+              download(record['name'], executable, record['sha256'], 512 * 1024**2)
               executable.chmod(0o755)
               environment = dict(os.environ, PATH='')
               if name.endswith('-llvm'):

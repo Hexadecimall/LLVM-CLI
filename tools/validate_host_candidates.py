@@ -49,6 +49,9 @@ def validate(volume, platforms):
     staging.mkdir(exist_ok=True)
     assets = {asset["name"]: asset for asset in release["assets"]}
     manifest = json.loads((staging / "native-probes.json").read_text())
+    names = {asset["id"]: asset["name"] for asset in assets.values()}
+    for record in manifest.values():
+        record["name"] = names[record["asset"]]
 
     def asset_for(path, digest):
         existing = assets.get(path.name)
@@ -59,7 +62,7 @@ def validate(volume, platforms):
                             if asset["name"] == path.name)
         if existing["digest"] != "sha256:" + digest or existing["size"] != path.stat().st_size:
             raise ValueError("remote validation asset does not match: " + path.name)
-        return {"asset": existing["id"], "sha256": digest}
+        return {"name": existing["name"], "sha256": digest}
 
     for platform in platforms:
         suffix = ".exe" if platform == "windows" else ""
@@ -81,7 +84,7 @@ def validate(volume, platforms):
     path = staging / ("native-candidates-" + digest[:16] + ".json")
     path.write_bytes(encoded)
     record = asset_for(path, digest)
-    body = {"ref": "main", "inputs": {"manifest_asset": str(record["asset"]),
+    body = {"ref": "main", "inputs": {"manifest_asset": record["name"],
                                       "manifest_sha256": record["sha256"]}}
     subprocess.run(["ghx", "api", "repos/Hexadecimall/LLVM-CLI/actions/workflows/native-probes.yml/dispatches",
                     "--method", "POST", "--body", json.dumps(body)], cwd=PROJECT, check=True)
