@@ -1,0 +1,61 @@
+--- a/lld/MachO/Driver.cpp
++++ b/lld/MachO/Driver.cpp
+@@ -46,6 +46,7 @@
+ #include "llvm/Support/FileSystem.h"
+ #include "llvm/Support/Parallel.h"
+ #include "llvm/Support/Path.h"
++#include "llvm/Support/VirtualFileSystem.h"
+ #include "llvm/Support/Process.h"
+ #include "llvm/Support/TarWriter.h"
+ #include "llvm/Support/TargetSelect.h"
+@@ -152,6 +153,13 @@
+   return {};
+ }
+ 
++static bool isLibraryDirectory(StringRef path) {
++  if (!path.starts_with("/__llvm/"))
++    return fs::is_directory(path);
++  auto status = vfs::getRealFileSystem()->status(path);
++  return status && status->isDirectory();
++}
++
+ static bool warnIfNotDirectory(StringRef option, StringRef path) {
+   if (path.starts_with("/__llvm/"))
+     return true;
+@@ -177,9 +185,10 @@
+     if (path::is_absolute(path, path::Style::posix)) {
+       for (StringRef root : roots) {
+         SmallString<261> buffer(root);
+-        path::append(buffer, path);
++        path::append(buffer, buffer.starts_with("/__llvm/")
++                                ? path::Style::posix : path::Style::native, path);
+         // Do not warn about paths that are computed via the syslib roots
+-        if (fs::is_directory(buffer)) {
++        if (isLibraryDirectory(buffer)) {
+           paths.push_back(saver().save(buffer.str()));
+           found = true;
+         }
+@@ -196,8 +205,9 @@
+   for (const StringRef &path : systemPaths) {
+     for (const StringRef &root : roots) {
+       SmallString<261> buffer(root);
+-      path::append(buffer, path);
+-      if (fs::is_directory(buffer))
++      path::append(buffer, buffer.starts_with("/__llvm/")
++                                ? path::Style::posix : path::Style::native, path);
++      if (isLibraryDirectory(buffer))
+         paths.push_back(saver().save(buffer.str()));
+     }
+   }
+--- a/lld/MachO/DriverUtils.cpp
++++ b/lld/MachO/DriverUtils.cpp
+@@ -334,7 +334,8 @@
+   SmallString<261> base;
+   for (StringRef dir : roots) {
+     base = dir;
+-    path::append(base, name);
++    path::append(base, dir.starts_with("/__llvm/")
++                           ? path::Style::posix : path::Style::native, name);
+     for (StringRef ext : extensions) {
+       Twine location = base + ext;
+       std::string locationString = location.str();

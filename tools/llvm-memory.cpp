@@ -2032,8 +2032,9 @@ LLVMEnumerateEmbeddedFiles(
     const bool sdkHeader = ActiveSdkHeaders &&
         (entry.Path.starts_with("root/include/") || entry.Path.starts_with("root/deps/include/"));
     const bool darwinResource = entry.Path.starts_with("root/targets/macos/") &&
-        std::getenv("SDKROOT") &&
-        std::string_view(std::getenv("SDKROOT")) == "/__llvm/targets/macos";
+        (ActiveCompileTarget.ends_with("-macos") ||
+         (std::getenv("SDKROOT") &&
+          std::string_view(std::getenv("SDKROOT")) == "/__llvm/targets/macos"));
     const bool targetResource = !ActiveCompileTarget.empty() &&
         entry.Path.starts_with("root/targets/" + ActiveCompileTarget +
                                "/include/");
