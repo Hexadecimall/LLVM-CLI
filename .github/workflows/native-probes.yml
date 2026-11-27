@@ -36,6 +36,7 @@ jobs:
           PROBE_PLATFORM: ${{ matrix.platform }}
         run: |
           import hashlib
+          import ctypes
           import json
           import os
           from pathlib import Path
@@ -107,6 +108,17 @@ jobs:
                   result = subprocess.run([str(output)], env=environment, text=True,
                                           capture_output=True, timeout=30, check=True)
                   assert result.stdout == 'embedded C++'
+                  library_source = Path('library.c')
+                  export = '__declspec(dllexport) ' if platform == 'windows' else ''
+                  library_source.write_text(export + 'int answer(void) { return 42; }\n')
+                  library = Path('probe.dll' if platform == 'windows' else 'probe.so').absolute()
+                  invoke(['cc', '-compile-target', target, '-shared', '-fPIC',
+                          str(library_source), '-o', str(library)])
+                  assert ctypes.CDLL(str(library)).answer() == 42
+                  other_target = 'x86_64-linux-gnu' if platform == 'windows' else 'x86_64-windows-gnu'
+                  invoke(['cc', '-compile-target', other_target, str(source), '-o', 'hello-cross'])
+                  other_magic = b'\x7fELF' if platform == 'windows' else b'MZ'
+                  assert Path('hello-cross').read_bytes().startswith(other_magic)
                   invoke(['cc', '-compile-target', 'aarch64-macos', str(source), '-o', 'hello-macos'])
                   assert Path('hello-macos').read_bytes()[:4] == bytes.fromhex('cffaedfe')
                   invoke(['cc', '-compile-target', 'wasm32-wasi', str(source), '-o', 'hello.wasm'])
