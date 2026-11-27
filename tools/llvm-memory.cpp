@@ -928,6 +928,20 @@ int runBundle(const std::string &bundleName, const std::string &invokedName,
   const bool recursiveFrontend = firstArgument < argc &&
       (std::string_view(argv[firstArgument]).starts_with("-cc1") ||
        std::string_view(argv[firstArgument]) == "-fc1");
+#ifdef _WIN32
+  if (recursiveFrontend && ActiveCompileTarget.empty()) {
+    // A frontend invocation receives the lowered triple instead of the
+    // wrapper's -compile-target option.
+    for (int index = firstArgument + 1; index + 1 < argc; ++index) {
+      if (std::string_view(argv[index]) != "-triple")
+        continue;
+      CompileTarget frontendTarget;
+      if (parseCompileTarget(argv[index + 1], frontendTarget))
+        ActiveCompileTarget = frontendTarget.Requested;
+      break;
+    }
+  }
+#endif
   const bool crossTarget = compileTarget && !compileTarget->Triple.empty();
   std::string_view rawTarget;
   bool arm64Runtime = !crossTarget || compileTarget->Arch == "aarch64";
@@ -2073,6 +2087,9 @@ LLVMReadEmbeddedFile(const char *path,
                      void *context) {
   std::string normalized(path);
   std::ranges::replace(normalized, '\\', '/');
+  if (normalized.size() > 2 && normalized[1] == ':' &&
+      std::string_view(normalized).substr(2).starts_with("/__llvm/"))
+    normalized.erase(0, 2);
   const Entry *entry = findResolvedEntry(packedPathForVirtual(normalized));
   if (!entry || entry->Header.Type != llvm_pack::EntryType::File)
     return false;
@@ -2095,7 +2112,8 @@ LLVMRunEmbeddedTool(const char *program, const char *const *arguments,
   if (!CurrentEntrypoint || argumentCount == 0)
     return 127;
 #ifdef _WIN32
-  std::vector<std::string> worker{"--llvm-internal-worker", canonicalTool(baseName(program))};
+  std::vector<std::string> worker{"--llvm-internal-worker",
+                                  canonicalTool(baseName(program)), ActiveCompileTarget};
   for (std::size_t index = 1; index < argumentCount; ++index)
     worker.emplace_back(arguments[index]);
   return runWindowsWorker(worker);
@@ -2179,10 +2197,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 #ifdef _WIN32
-  if (argc >= 3 && std::string_view(argv[1]) == "--llvm-internal-worker") {
+  if (argc >= 4 && std::string_view(argv[1]) == "--llvm-internal-worker") {
     const std::string name = canonicalTool(argv[2]);
     const std::string bundle = resolveTool(name);
-    return bundle.empty() ? 127 : runBundle(bundle, name, argc, argv, 3);
+    ActiveCompileTarget = argv[3];
+    return bundle.empty() ? 127 : runBundle(bundle, name, argc, argv, 4);
   }
 #endif
   const std::string invokedAs = baseName(argc ? argv[0] : nullptr);

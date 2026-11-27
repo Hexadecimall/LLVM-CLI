@@ -21,8 +21,12 @@
  #include "llvm/Support/raw_ostream.h"
  #include "llvm/TargetParser/Host.h"
  #include "llvm/TargetParser/RISCVISAInfo.h"
-@@ -6890,7 +6903,7 @@
-       llvm::sys::path::append(P, Name);
+@@ -6887,10 +6900,10 @@
+   for (const auto &PrefixDir : PrefixDirs) {
+     if (StringRef(PrefixDir).starts_with("/__llvm/bin")) {
+       SmallString<128> P(PrefixDir);
+-      llvm::sys::path::append(P, Name);
++      llvm::sys::path::append(P, llvm::sys::path::Style::posix, Name);
        using HasEmbeddedTool = bool (*)(const char *);
        auto HasTool = reinterpret_cast<HasEmbeddedTool>(
 -          dlsym(RTLD_DEFAULT, "LLVMHasEmbeddedTool"));
@@ -85,7 +89,29 @@
  #include <iterator>
  #include <limits>
  #include <map>
-@@ -428,7 +441,7 @@
+@@ -133,6 +146,21 @@
+ }
+ 
+ std::error_code FileSystem::makeAbsolute(SmallVectorImpl<char> &Path) const {
++#ifdef _WIN32
++  const StringRef Name(Path.data(), Path.size());
++  const auto Drive = llvm::sys::path::root_name(Name);
++  const auto Virtual = Name.drop_front(Drive.size());
++  // The embedded resource root has no Windows drive. Keep the same
++  // canonical path before and after the overlay inherits the real CWD.
++  if (Virtual == "/__llvm" || Virtual == "\\__llvm" ||
++      Virtual.starts_with("/__llvm/") || Virtual.starts_with("\\__llvm\\")) {
++    Path.erase(Path.begin(), Path.begin() + Drive.size());
++    for (char &Character : Path)
++      if (Character == '\\')
++        Character = '/';
++    return {};
++  }
++#endif
+   if (llvm::sys::path::is_absolute(Path))
+     return {};
+ 
+@@ -428,7 +456,7 @@
  static IntrusiveRefCntPtr<InMemoryFileSystem> createEmbeddedFileSystem() {
    static IntrusiveRefCntPtr<InMemoryFileSystem> Memory = [] {
      auto Enumerate = reinterpret_cast<LLVMEnumerateEmbeddedFilesFn>(
@@ -118,24 +144,26 @@
  
 --- a/llvm/lib/Support/MemoryBuffer.cpp
 +++ b/llvm/lib/Support/MemoryBuffer.cpp
-@@ -17,6 +17,9 @@
+@@ -17,6 +17,10 @@
  #include "llvm/Support/Alignment.h"
  #include "llvm/Support/AutoConvert.h"
  #include "llvm/Support/Errc.h"
 +#ifdef _WIN32
 +#include "llvm/Support/DynamicLibrary.h"
++#include "llvm/Support/Path.h"
 +#endif
  #include "llvm/Support/Error.h"
  #include "llvm/Support/ErrorHandling.h"
  #include "llvm/Support/FileSystem.h"
-@@ -267,6 +270,24 @@
+@@ -267,6 +271,25 @@
                        std::optional<Align> Alignment) {
    sys::sandbox::violationIfEnabled();
  
 +#ifdef _WIN32
 +  SmallString<256> PathStorage;
 +  StringRef Path = Filename.toNullTerminatedStringRef(PathStorage);
-+  if (Path.starts_with("/__llvm/") || Path.starts_with("\\__llvm\\")) {
++  const auto Virtual = Path.drop_front(sys::path::root_name(Path).size());
++  if (Virtual.starts_with("/__llvm/") || Virtual.starts_with("\\__llvm\\")) {
 +    using Reader = bool (*)(const char *, void (*)(const void *, size_t, void *), void *);
 +    auto Process = sys::DynamicLibrary::getPermanentLibrary(nullptr);
 +    auto Read = reinterpret_cast<Reader>(
@@ -153,35 +181,3 @@
    return getFileAux<MemoryBuffer>(Filename, /*MapSize=*/-1, /*Offset=*/0,
                                    IsText, RequiresNullTerminator, IsVolatile,
                                    Alignment);
---- a/clang/lib/Driver/Driver.cpp
-+++ b/clang/lib/Driver/Driver.cpp
-@@ -6900,7 +6900,7 @@
-   for (const auto &PrefixDir : PrefixDirs) {
-     if (StringRef(PrefixDir).starts_with("/__llvm/bin")) {
-       SmallString<128> P(PrefixDir);
--      llvm::sys::path::append(P, Name);
-+      llvm::sys::path::append(P, llvm::sys::path::Style::posix, Name);
-       using HasEmbeddedTool = bool (*)(const char *);
-       auto HasTool = reinterpret_cast<HasEmbeddedTool>(
-           findEmbeddedSymbol("LLVMHasEmbeddedTool"));
---- a/llvm/lib/Support/VirtualFileSystem.cpp
-+++ b/llvm/lib/Support/VirtualFileSystem.cpp
-@@ -146,6 +146,18 @@
- }
- 
- std::error_code FileSystem::makeAbsolute(SmallVectorImpl<char> &Path) const {
-+#ifdef _WIN32
-+  const StringRef Name(Path.data(), Path.size());
-+  // The embedded resource root has no Windows drive. Keep the same
-+  // canonical path before and after the overlay inherits the real CWD.
-+  if (Name == "/__llvm" || Name == "\\__llvm" ||
-+      Name.starts_with("/__llvm/") || Name.starts_with("\\__llvm\\")) {
-+    for (char &Character : Path)
-+      if (Character == '\\')
-+        Character = '/';
-+    return {};
-+  }
-+#endif
-   if (llvm::sys::path::is_absolute(Path))
-     return {};
- 
